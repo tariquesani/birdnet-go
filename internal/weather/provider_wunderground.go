@@ -341,7 +341,7 @@ func (p *WundergroundProvider) executeRequest(apiURL string, cfg *wundergroundCo
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, handleWundergroundRequestError(err, ctx)
+		return nil, handleWundergroundRequestError(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -358,7 +358,7 @@ func (p *WundergroundProvider) executeRequest(apiURL string, cfg *wundergroundCo
 }
 
 // handleWundergroundRequestError categorizes HTTP request errors
-func handleWundergroundRequestError(err error, ctx context.Context) error {
+func handleWundergroundRequestError(ctx context.Context, err error) error {
 	var category errors.ErrorCategory
 	switch ctx.Err() {
 	case context.Canceled:

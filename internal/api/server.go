@@ -776,6 +776,24 @@ func (s *Server) handleOAuthCallback(c echo.Context) error {
 		)
 	}
 
+	// Store or clear ID token for RP-Initiated Logout (OIDC providers)
+	if user.IDToken != "" {
+		if err := gothic.StoreInSession("id_token", user.IDToken, req, c.Response()); err != nil {
+			s.slogger.Error("Failed to store ID token in session",
+				logger.Error(err),
+				logger.String("provider", provider),
+			)
+		}
+	} else {
+		// Clear stale ID token to prevent reuse across auth flows
+		if err := gothic.StoreInSession("id_token", "", req, c.Response()); err != nil {
+			s.slogger.Error("Failed to clear ID token in session",
+				logger.Error(err),
+				logger.String("provider", provider),
+			)
+		}
+	}
+
 	s.slogger.Info("OAuth session established, redirecting to dashboard",
 		logger.String("provider", provider),
 		logger.String("user_id", userId),
@@ -785,15 +803,11 @@ func (s *Server) handleOAuthCallback(c echo.Context) error {
 	return c.Redirect(http.StatusFound, ingressPath(c, s.settings)+"/ui/dashboard")
 }
 
-// isValidOAuthProvider checks if the provider name is valid.
+// isValidOAuthProvider checks if the provider name is a valid goth provider name.
+// Uses the ConfigToGothProvider map to derive valid providers dynamically.
 func (s *Server) isValidOAuthProvider(provider string) bool {
-	validProviders := []string{
-		security.ProviderGoogle,
-		security.ProviderGitHub,
-		security.ProviderMicrosoft,
-	}
-	for _, p := range validProviders {
-		if strings.EqualFold(provider, p) {
+	for _, gothName := range security.ConfigToGothProvider {
+		if strings.EqualFold(provider, gothName) {
 			return true
 		}
 	}
@@ -801,48 +815,38 @@ func (s *Server) isValidOAuthProvider(provider string) bool {
 }
 
 // isAllowedOAuthUser checks if the OAuth user is in the allowed users list for the provider.
-func (s *Server) isAllowedOAuthUser(provider, userID, email string) bool {
+// Uses the OAuthProviders array with a reverse lookup from goth provider name to config provider ID.
+func (s *Server) isAllowedOAuthUser(gothProvider, userID, email string) bool {
 	if s.settings == nil {
 		return false
 	}
 
-	var allowedUsers string
-	var enabled bool
-
-	switch strings.ToLower(provider) {
-	case security.ProviderGoogle:
-		enabled = s.settings.Security.GoogleAuth.Enabled
-		allowedUsers = s.settings.Security.GoogleAuth.UserId
-	case security.ProviderGitHub:
-		enabled = s.settings.Security.GithubAuth.Enabled
-		allowedUsers = s.settings.Security.GithubAuth.UserId
-	case security.ProviderMicrosoft:
-		enabled = s.settings.Security.MicrosoftAuth.Enabled
-		allowedUsers = s.settings.Security.MicrosoftAuth.UserId
-	default:
+	// Reverse lookup: goth provider name → config provider ID
+	configProvider := ""
+	for cfg, gothName := range security.ConfigToGothProvider {
+		if strings.EqualFold(gothName, gothProvider) {
+			configProvider = cfg
+			break
+		}
+	}
+	if configProvider == "" {
 		return false
 	}
 
-	if !enabled {
-		return false
-	}
-
-	// If no allowed users configured, deny access
-	if allowedUsers == "" {
+	provider := s.settings.GetOAuthProvider(configProvider)
+	if provider == nil || !provider.Enabled || provider.UserID == "" {
 		return false
 	}
 
 	// Check if user ID or email matches any allowed user
-	for allowed := range strings.SplitSeq(allowedUsers, ",") {
+	for allowed := range strings.SplitSeq(provider.UserID, ",") {
 		trimmed := strings.TrimSpace(allowed)
 		if trimmed == "" {
 			continue
 		}
-		// Case-insensitive comparison for both userID and email
 		if strings.EqualFold(trimmed, userID) || strings.EqualFold(trimmed, email) {
 			return true
 		}
 	}
-
 	return false
 }

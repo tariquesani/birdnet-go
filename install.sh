@@ -4177,9 +4177,9 @@ clean_installation() {
                 for dir in "$CONFIG_DIR" "$DATA_DIR"; do
                     if [ -d "$dir" ]; then
                         error_list="${error_list}Files in $dir:\n"
-                        find "$dir" -type f 2>/dev/null | while read -r file; do
+                        while IFS= read -r file; do
                             error_list="${error_list}  • $file\n"
-                        done
+                        done < <(find "$dir" -type f 2>/dev/null)
                     fi
                 done
             }

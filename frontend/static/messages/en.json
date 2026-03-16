@@ -131,7 +131,8 @@
       "calendarNavigation": "Use arrow keys to navigate calendar, Enter to select, Escape to close",
       "downloadCsv": "Download species list as CSV",
       "visitEbirdLink": "Open eBird.org in a new tab",
-      "learnEbirdTaxonomyLink": "Open eBird Taxonomy in a new tab"
+      "learnEbirdTaxonomyLink": "Open eBird Taxonomy in a new tab",
+      "resizeHandle": "Drag to resize"
     },
     "labels": {
       "confidence": "Confidence",
@@ -710,7 +711,10 @@
       "widthFull": "Full width",
       "widthHalf": "Half width",
       "fullWidthOnly": "Full width only",
-      "settings": "Settings"
+      "settings": "Settings",
+      "resetDashboard": "Reset Dashboard",
+      "resetConfirm": "Reset the dashboard to its default layout? This will remove any customizations.",
+      "resetting": "Resetting..."
     },
     "elements": {
       "banner": "Dashboard Banner",
@@ -1652,6 +1656,15 @@
           "description": "Reduce false detections by requiring multiple confirmations across overlapping audio segments",
           "level": {
             "label": "Filter Level"
+          },
+          "detectionCount": "{count} confirmations required. {description}",
+          "levels": {
+            "off": "No filtering - accepts first detection immediately",
+            "lenient": "For low-quality audio (RTSP cameras, webcam mics)",
+            "moderate": "Balanced for typical hobby setups",
+            "balanced": "Original pre-Sept 2025 behavior",
+            "strict": "RPi 4+ needed. For high-quality microphones",
+            "maximum": "RPi 4+ needed. For professional-grade microphones"
           },
           "hardwareNote": "Strict and Maximum levels require higher overlap settings and more CPU resources. RPi 4 or better hardware is required for these levels.",
           "overlapAdjusted": "Overlap setting automatically adjusted to {overlap}s to meet filter requirements",
@@ -2639,7 +2652,16 @@
           "label": "Cache Duration (hours)",
           "helpText": "How long to cache taxonomy data from eBird. Taxonomy rarely changes, so longer cache durations reduce API calls."
         },
-        "note": "eBird provides taxonomic data used for species classification and insights. The API key is free to obtain from the Cornell Lab of Ornithology."
+        "note": "eBird provides taxonomic data used for species classification and insights. The API key is free to obtain from the Cornell Lab of Ornithology.",
+        "apiKeyInfo": "A personal eBird API key is required to use this integration. You can request a free key from <a href=\"https://ebird.org/api/keygen\" class=\"link link-primary\" target=\"_blank\" rel=\"noopener noreferrer\">ebird.org/api/keygen</a>.",
+        "test": {
+          "button": "Test eBird Connection",
+          "loading": "Testing...",
+          "enabledRequired": "Enable eBird integration first",
+          "apiKeyRequired": "API key is required",
+          "inProgress": "Test in progress...",
+          "description": "Test eBird API connectivity and authentication"
+        }
       }
     },
     "audio": {
@@ -3019,8 +3041,8 @@
         "passwordHelpText": "Limit access to settings with a password."
       },
       "oauth": {
-        "title": "OAuth2 Social Authentication",
-        "description": "Single sign-on to log in with your existing account",
+        "title": "External Authentication",
+        "description": "Sign in with an external identity provider or OIDC",
         "form": {
           "editTitle": "Edit OAuth Provider",
           "addTitle": "Add OAuth Provider",
@@ -3038,7 +3060,7 @@
           "deleteConfirm": "Are you sure you want to delete the {provider} OAuth provider?"
         },
         "noProviders": "No OAuth providers configured",
-        "noProvidersDescription": "Add a provider to enable social login with Google, GitHub, Microsoft, LINE, or Kakao accounts.",
+        "noProvidersDescription": "Add a provider to enable login with Google, GitHub, Microsoft, LINE, Kakao, or a custom OIDC provider.",
         "enableProviderLabel": "Enable this provider",
         "getCredentialsLabel": "Get your credentials from {provider}",
         "redirectUriTitle": "Redirect URI:",
@@ -3102,6 +3124,25 @@
           "clientSecretLabel": "Client Secret",
           "clientSecretHelpText": "The Client Secret obtained from Kakao Developers Console when setting up Kakao Login.",
           "userIdLabel": "User ID"
+        },
+        "oidc": {
+          "title": "OIDC Provider",
+          "enableLabel": "Enable OIDC authentication",
+          "redirectUriTitle": "Redirect URI",
+          "getCredentialsLabel": "Configure in your Identity Provider",
+          "clientIdLabel": "Client ID",
+          "clientIdHelpText": "The client ID from your OIDC identity provider",
+          "clientSecretLabel": "Client Secret",
+          "clientSecretHelpText": "The client secret from your OIDC identity provider",
+          "userIdLabel": "Allowed User (email or sub claim)",
+          "issuerUrlLabel": "Issuer URL",
+          "issuerUrlHelpText": "The issuer URL of your OpenID Connect identity provider (e.g., https://auth.example.com)",
+          "issuerUrlPlaceholder": "https://auth.example.com",
+          "issuerUrlRequired": "Issuer URL is required for OIDC providers",
+          "issuerUrlInvalid": "Issuer URL must be a valid HTTP or HTTPS URL",
+          "scopesLabel": "Scopes",
+          "scopesHelpText": "Comma-separated list of OIDC scopes (default: openid, profile, email)",
+          "scopesPlaceholder": "openid, profile, email"
         }
       },
       "bypassAuthentication": {
@@ -3752,6 +3793,7 @@
     "continueWithMicrosoft": "Continue with Microsoft",
     "continueWithLine": "Continue with LINE",
     "continueWithKakao": "Continue with Kakao",
+    "continueWithOidc": "Continue with OIDC",
     "errors": {
       "loginFailed": "Login failed. Please check your password and try again.",
       "passwordRequired": "Password is required.",
@@ -3894,7 +3936,8 @@
       "highPassFilter": "High-pass filter control: {freq} Hz",
       "seekProgress": "Seek audio progress: {current} / {total} seconds",
       "playbackSpeed": "Playback speed",
-      "speed": "Speed"
+      "speed": "Speed",
+      "loop": "Toggle loop"
     },
     "spectrogram": {
       "notGenerated": "Spectrogram not yet generated",
@@ -3985,6 +4028,22 @@
         "extractError": "Failed to extract clip",
         "formatLabel": "Format",
         "rangeLabel": "{start}s – {end}s"
+      },
+      "processing": {
+        "playSelection": "Play selection",
+        "skipToStart": "Skip to selection start",
+        "clearSelection": "Clear selection",
+        "gain": "Gain (dB)",
+        "denoise": "Denoise",
+        "denoiseOff": "Off",
+        "denoiseLight": "Light",
+        "denoiseMedium": "Medium",
+        "denoiseHeavy": "Heavy",
+        "normalize": "Normalize audio",
+        "normalizeTooltip": "EBU R128 Normalization",
+        "export": "Export",
+        "exportOriginal": "Original",
+        "processingActive": "Processing active"
       }
     },
     "weatherInfo": {

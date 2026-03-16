@@ -131,7 +131,8 @@
       "calendarNavigation": "Käytä nuolinäppäimiä kalenterissa liikkumiseen, Enter valitsee, Esc sulkee",
       "downloadCsv": "Lataa lajilista CSV-tiedostona",
       "visitEbirdLink": "Avaa eBird.org uuteen välilehteen",
-      "learnEbirdTaxonomyLink": "Avaa eBird-taksonomia uuteen välilehteen"
+      "learnEbirdTaxonomyLink": "Avaa eBird-taksonomia uuteen välilehteen",
+      "resizeHandle": "Vedä muuttaaksesi kokoa"
     },
     "labels": {
       "confidence": "Luottamus",
@@ -710,7 +711,10 @@
       "widthFull": "Täysi leveys",
       "widthHalf": "Puolikas leveys",
       "fullWidthOnly": "Vain täysi leveys",
-      "settings": "Asetukset"
+      "settings": "Asetukset",
+      "resetDashboard": "Palauta kojelauta",
+      "resetConfirm": "Palautetaanko kojelauta oletusasetteluun? Kaikki mukautukset poistetaan.",
+      "resetting": "Palautetaan..."
     },
     "elements": {
       "banner": "Dashboard Banner",
@@ -1610,6 +1614,15 @@
           "description": "Vähentää virheellisiä havaintoja vaatimalla useita vahvistuksia päällekkäisistä äänisegmenteistä",
           "level": {
             "label": "Suodatustaso"
+          },
+          "detectionCount": "{count} vahvistusta vaaditaan. {description}",
+          "levels": {
+            "off": "Ei suodatusta - hyväksyy ensimmäisen havainnon välittömästi",
+            "lenient": "Heikkolaatuiselle äänelle (RTSP-kamerat, web-kameramikrofonit)",
+            "moderate": "Tasapainoinen tyypillisille harrastusasetuksille",
+            "balanced": "Alkuperäinen toiminta ennen syyskuuta 2025",
+            "strict": "RPi 4+ vaaditaan. Laadukkaille mikrofoneille",
+            "maximum": "RPi 4+ vaaditaan. Ammattitason mikrofoneille"
           },
           "hardwareNote": "Tiukka- ja maksimitasot vaativat korkeampia päällekkäisyysasetuksia ja enemmän prosessoritehoa. RPi 4 tai parempi laitteisto vaaditaan näille tasoille.",
           "overlapAdjusted": "Päällekkäisyysasetus säädetty automaattisesti arvoon {overlap}s suodatinvaatimusten täyttämiseksi",
@@ -2945,7 +2958,16 @@
           "label": "Välimuistin kesto (tuntia)",
           "helpText": "Kuinka kauan eBirdin taksonomiatietoja säilytetään välimuistissa. Taksonomia muuttuu harvoin, joten pidempi välimuistiaika vähentää API-kutsuja."
         },
-        "note": "eBird tarjoaa taksonomiatietoja lajien luokitteluun ja analyyseihin. API-avain on saatavilla ilmaiseksi Cornellin ornitologian laboratoriosta."
+        "note": "eBird tarjoaa taksonomiatietoja lajien luokitteluun ja analyyseihin. API-avain on saatavilla ilmaiseksi Cornellin ornitologian laboratoriosta.",
+        "apiKeyInfo": "A personal eBird API key is required to use this integration. You can request a free key from <a href=\"https://ebird.org/api/keygen\" class=\"link link-primary\" target=\"_blank\" rel=\"noopener noreferrer\">ebird.org/api/keygen</a>.",
+        "test": {
+          "button": "Test eBird Connection",
+          "loading": "Testing...",
+          "enabledRequired": "Enable eBird integration first",
+          "apiKeyRequired": "API key is required",
+          "inProgress": "Test in progress...",
+          "description": "Test eBird API connectivity and authentication"
+        }
       }
     },
     "species": {
@@ -3285,8 +3307,8 @@
         "disabled": "Salasana-autentikointi on poistettu käytöstä"
       },
       "oauth": {
-        "title": "OAuth2-sosiaalinen tunnistautuminen",
-        "description": "Kertakirjautuminen olemassa olevalla tililläsi",
+        "title": "Ulkoinen tunnistautuminen",
+        "description": "Kirjaudu ulkoisella identiteetintarjoajalla tai OIDC:llä",
         "form": {
           "editTitle": "Muokkaa OAuth-tarjoajaa",
           "addTitle": "Lisää OAuth-tarjoaja",
@@ -3304,7 +3326,7 @@
           "deleteConfirm": "Haluatko varmasti poistaa {provider} OAuth-tarjoajan?"
         },
         "noProviders": "OAuth-tarjoajia ei ole määritetty",
-        "noProvidersDescription": "Lisää tarjoaja ottaaksesi käyttöön sosiaalisen kirjautumisen Google-, GitHub- tai Microsoft-tilillä.",
+        "noProvidersDescription": "Lisää tarjoaja ottaaksesi käyttöön kirjautumisen Google-, GitHub-, Microsoft-, LINE-, Kakao- tai OIDC-tunnistautumisella.",
         "enableProviderLabel": "Ota tämä tarjoaja käyttöön",
         "getCredentialsLabel": "Hae tunnuksesi palvelusta {provider}",
         "redirectUriTitle": "Uudelleenohjaus-URI:",
@@ -3368,6 +3390,25 @@
           "clientSecretLabel": "Client Secret",
           "clientSecretHelpText": "Kakao Developers Consolesta saatu Client Secret Kakao Login -määrityksen yhteydessä.",
           "userIdLabel": "Käyttäjätunnus"
+        },
+        "oidc": {
+          "title": "OIDC Provider",
+          "enableLabel": "Enable OIDC authentication",
+          "redirectUriTitle": "Redirect URI",
+          "getCredentialsLabel": "Configure in your Identity Provider",
+          "clientIdLabel": "Client ID",
+          "clientIdHelpText": "The client ID from your OIDC identity provider",
+          "clientSecretLabel": "Client Secret",
+          "clientSecretHelpText": "The client secret from your OIDC identity provider",
+          "userIdLabel": "Allowed User (email or sub claim)",
+          "issuerUrlLabel": "Issuer URL",
+          "issuerUrlHelpText": "The issuer URL of your OpenID Connect identity provider (e.g., https://auth.example.com)",
+          "issuerUrlPlaceholder": "https://auth.example.com",
+          "issuerUrlRequired": "Issuer URL is required for OIDC providers",
+          "issuerUrlInvalid": "Issuer URL must be a valid HTTP or HTTPS URL",
+          "scopesLabel": "Scopes",
+          "scopesHelpText": "Comma-separated list of OIDC scopes (default: openid, profile, email)",
+          "scopesPlaceholder": "openid, profile, email"
         }
       },
       "bypassAuthentication": {
@@ -3728,6 +3769,7 @@
     "continueWithMicrosoft": "Jatka Microsoftilla",
     "continueWithLine": "Jatka LINE:llä",
     "continueWithKakao": "Jatka Kakaolla",
+    "continueWithOidc": "Continue with OIDC",
     "errors": {
       "loginFailed": "Kirjautuminen epäonnistui. Tarkista salasanasi ja yritä uudelleen.",
       "passwordRequired": "Salasana vaaditaan.",
@@ -3870,7 +3912,8 @@
       "highPassFilter": "Ylipäästösuodattimen hallinta: {freq} Hz",
       "seekProgress": "Äänen eteneminen: {current} / {total} sekuntia",
       "playbackSpeed": "Toistonopeus",
-      "speed": "Nopeus"
+      "speed": "Nopeus",
+      "loop": "Toggle loop"
     },
     "spectrogram": {
       "notGenerated": "Spektrogrammia ei ole vielä generoitu",
@@ -3949,18 +3992,34 @@
       "clipExtraction": {
         "selectRange": "Click and drag to select a range",
         "playSelection": "Play selected range",
-        "pauseSelection": "Keskeytä toisto",
-        "reviewSelection": "Siirry valinnan alkuun",
-        "selectionStart": "Valinnan alkukahva",
-        "selectionEnd": "Valinnan loppukahva",
-        "lossless": "Häviötön",
-        "lossy": "Häviöllinen",
+        "pauseSelection": "Pause playback",
+        "reviewSelection": "Jump to start of selection",
+        "selectionStart": "Selection start handle",
+        "selectionEnd": "Selection end handle",
+        "lossless": "Lossless",
+        "lossy": "Lossy",
         "extractClip": "Download selected clip",
         "clearSelection": "Clear selection",
         "extracting": "Extracting clip...",
         "extractError": "Failed to extract clip",
         "formatLabel": "Format",
         "rangeLabel": "{start}s – {end}s"
+      },
+      "processing": {
+        "playSelection": "Play selection",
+        "skipToStart": "Skip to selection start",
+        "clearSelection": "Clear selection",
+        "gain": "Gain (dB)",
+        "denoise": "Denoise",
+        "denoiseOff": "Off",
+        "denoiseLight": "Light",
+        "denoiseMedium": "Medium",
+        "denoiseHeavy": "Heavy",
+        "normalize": "Normalize audio",
+        "normalizeTooltip": "EBU R128 Normalization",
+        "export": "Export",
+        "exportOriginal": "Alkuperäinen",
+        "processingActive": "Processing active"
       }
     },
     "weatherInfo": {

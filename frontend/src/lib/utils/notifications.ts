@@ -130,22 +130,17 @@ export function isToastNotification(notification: Notification): boolean {
 /**
  * Determines if a notification should be shown based on filters
  * @param notification - The notification to check
- * @param debugMode - Whether debug mode is enabled (shows all notifications)
+ * @param _debugMode - Reserved for future debug-level filtering
  * @param excludeToasts - Whether to exclude toast notifications
  */
 export function shouldShowNotification(
   notification: Notification,
-  debugMode = false,
+  _debugMode = false,
   excludeToasts = true
 ): boolean {
   // Never show toast notifications in persistent views if excludeToasts is true
   if (excludeToasts && isToastNotification(notification)) {
     return false;
-  }
-
-  // In debug mode, show all notifications including low priority
-  if (debugMode) {
-    return true;
   }
 
   // Backend already filters low priority notifications

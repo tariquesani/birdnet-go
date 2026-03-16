@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-// getUnixMetadata is a no-op on Windows
-func getUnixMetadata(metadata *FileMetadata, info os.FileInfo) {
+// populateUnixMetadata is a no-op on Windows
+func populateUnixMetadata(metadata *FileMetadata, info os.FileInfo) {
 	// No Unix metadata on Windows
 }

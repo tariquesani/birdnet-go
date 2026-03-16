@@ -92,8 +92,8 @@
   let ReviewCard: ReviewCardComponent | null = $state(null);
 
   // Use the existing auth store pattern (same as DesktopSidebar)
-  let canReview = $derived(hasReviewPermission());
-  let clipExtractionEnabled = $derived(isAuthenticated());
+  let canReview = $derived($hasReviewPermission);
+  let clipExtractionEnabled = $derived($isAuthenticated);
   let detection = $state<Detection | null>(null);
   let speciesInfo = $state<SpeciesInfo | null>(null);
   let taxonomyInfo = $state<TaxonomyInfo | null>(null);
@@ -1324,43 +1324,18 @@
 
   /* ----- Audio Container ----- */
   .detail-audio-container {
-    position: relative;
     width: 100%;
     max-width: 1200px;
     margin: 0 auto;
-    min-height: var(--spectrogram-min-height, 60px);
-    aspect-ratio: var(--spectrogram-aspect-ratio, 2 / 1);
-    background: linear-gradient(to bottom, rgb(128 128 128 / 0.04), rgb(128 128 128 / 0.01));
-    border-radius: var(--radius-field);
-    overflow: hidden;
   }
 
   .detail-audio-container :global(.group) {
-    width: 100%;
-    height: 100%;
-    position: absolute;
-    top: 0;
-    left: 0;
-  }
-
-  .detail-audio-container > :global(div > .group) {
-    width: 100%;
-    height: 100%;
-    position: absolute;
-    top: 0;
-    left: 0;
+    position: relative;
   }
 
   .detail-audio-container :global(img) {
-    object-fit: contain;
-    height: 100%;
     width: 100%;
-  }
-
-  .detail-audio-container :global(.group img),
-  .detail-audio-container :global(div img) {
-    object-fit: contain;
-    height: 100%;
-    width: 100%;
+    height: auto;
+    display: block;
   }
 </style>

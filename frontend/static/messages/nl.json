@@ -131,7 +131,8 @@
       "calendarNavigation": "Navigeer met pijl toetsen door de kalender, Enter om te selecteren, Esc om te sluiten",
       "downloadCsv": "Soorten lijst als CSV ophalen",
       "visitEbirdLink": "Open eBird.org in een nieuwe tab",
-      "learnEbirdTaxonomyLink": "Open eBird Taxonomy in een nieuwe tab"
+      "learnEbirdTaxonomyLink": "Open eBird Taxonomy in een nieuwe tab",
+      "resizeHandle": "Sleep om te vergroten/verkleinen"
     },
     "labels": {
       "confidence": "Betrouwbaarheid",
@@ -710,7 +711,10 @@
       "widthFull": "Volledige breedte",
       "widthHalf": "Halve breedte",
       "fullWidthOnly": "Alleen volledige breedte",
-      "settings": "Instellingen"
+      "settings": "Instellingen",
+      "resetDashboard": "Dashboard resetten",
+      "resetConfirm": "Dashboard naar de standaardindeling resetten? Alle aanpassingen worden verwijderd.",
+      "resetting": "Resetten..."
     },
     "elements": {
       "banner": "Dashboard-banner",
@@ -1610,6 +1614,15 @@
           "description": "Vermindert valse detecties door meerdere bevestigingen te vereisen over overlappende audiosegmenten",
           "level": {
             "label": "Filterniveau"
+          },
+          "detectionCount": "{count} bevestigingen vereist. {description}",
+          "levels": {
+            "off": "Geen filtering - accepteert eerste detectie onmiddellijk",
+            "lenient": "Voor audio van lage kwaliteit (RTSP-camera's, webcammicrofoons)",
+            "moderate": "Gebalanceerd voor typische hobbyopstellingen",
+            "balanced": "Origineel gedrag van voor september 2025",
+            "strict": "RPi 4+ vereist. Voor hoogwaardige microfoons",
+            "maximum": "RPi 4+ vereist. Voor professionele microfoons"
           },
           "hardwareNote": "De niveaus \"Strikt\" en \"Maximum\" vereisen hogere overlap-instellingen en meer CPU-bronnen. RPi 4 of betere hardware is vereist voor deze niveaus.",
           "overlapAdjusted": "Overlap-instelling automatisch aangepast naar {overlap}s om aan de filtervereisten te voldoen",
@@ -2603,7 +2616,16 @@
           "label": "Cacheduur (uren)",
           "helpText": "Hoe lang taxonomiegegevens van eBird in de cache worden bewaard. Taxonomie verandert zelden, dus langere cachetijden verminderen API-aanroepen."
         },
-        "note": "eBird levert taxonomische gegevens voor soortclassificatie en inzichten. De API-sleutel is gratis verkrijgbaar bij het Cornell Lab of Ornithology."
+        "note": "eBird levert taxonomische gegevens voor soortclassificatie en inzichten. De API-sleutel is gratis verkrijgbaar bij het Cornell Lab of Ornithology.",
+        "apiKeyInfo": "A personal eBird API key is required to use this integration. You can request a free key from <a href=\"https://ebird.org/api/keygen\" class=\"link link-primary\" target=\"_blank\" rel=\"noopener noreferrer\">ebird.org/api/keygen</a>.",
+        "test": {
+          "button": "Test eBird Connection",
+          "loading": "Testing...",
+          "enabledRequired": "Enable eBird integration first",
+          "apiKeyRequired": "API key is required",
+          "inProgress": "Test in progress...",
+          "description": "Test eBird API connectivity and authentication"
+        }
       }
     },
     "audio": {
@@ -2983,8 +3005,8 @@
         "disabled": "Password authentication is disabled"
       },
       "oauth": {
-        "title": "OAuth2 Sociale Authenticatie",
-        "description": "Eenmalige aanmelding om in te loggen met uw bestaande account",
+        "title": "Externe authenticatie",
+        "description": "Inloggen met een externe identiteitsprovider of OIDC",
         "form": {
           "editTitle": "OAuth-provider bewerken",
           "addTitle": "OAuth-provider toevoegen",
@@ -3002,7 +3024,7 @@
           "deleteConfirm": "Weet u zeker dat u de {provider} OAuth-provider wilt verwijderen?"
         },
         "noProviders": "Geen OAuth-providers geconfigureerd",
-        "noProvidersDescription": "Voeg een provider toe om sociale aanmelding met Google-, GitHub- of Microsoft-accounts in te schakelen.",
+        "noProvidersDescription": "Voeg een provider toe om inloggen met Google, GitHub, Microsoft, LINE, Kakao of een aangepaste OIDC-provider mogelijk te maken.",
         "enableProviderLabel": "Deze provider inschakelen",
         "getCredentialsLabel": "Verkrijg uw inloggegevens van {provider}",
         "redirectUriTitle": "Redirect URI:",
@@ -3066,6 +3088,25 @@
           "clientSecretLabel": "Client Secret",
           "clientSecretHelpText": "Het Client Secret verkregen uit Kakao Developers Console bij het instellen van Kakao Login.",
           "userIdLabel": "Gebruikers-ID"
+        },
+        "oidc": {
+          "title": "OIDC Provider",
+          "enableLabel": "Enable OIDC authentication",
+          "redirectUriTitle": "Redirect URI",
+          "getCredentialsLabel": "Configure in your Identity Provider",
+          "clientIdLabel": "Client ID",
+          "clientIdHelpText": "The client ID from your OIDC identity provider",
+          "clientSecretLabel": "Client Secret",
+          "clientSecretHelpText": "The client secret from your OIDC identity provider",
+          "userIdLabel": "Allowed User (email or sub claim)",
+          "issuerUrlLabel": "Issuer URL",
+          "issuerUrlHelpText": "The issuer URL of your OpenID Connect identity provider (e.g., https://auth.example.com)",
+          "issuerUrlPlaceholder": "https://auth.example.com",
+          "issuerUrlRequired": "Issuer URL is required for OIDC providers",
+          "issuerUrlInvalid": "Issuer URL must be a valid HTTP or HTTPS URL",
+          "scopesLabel": "Scopes",
+          "scopesHelpText": "Comma-separated list of OIDC scopes (default: openid, profile, email)",
+          "scopesPlaceholder": "openid, profile, email"
         }
       },
       "bypassAuthentication": {
@@ -3728,6 +3769,7 @@
     "continueWithMicrosoft": "Doorgaan met Microsoft",
     "continueWithLine": "Doorgaan met LINE",
     "continueWithKakao": "Doorgaan met Kakao",
+    "continueWithOidc": "Continue with OIDC",
     "errors": {
       "loginFailed": "Aanmelding mislukt. Controleer je wachtwoord en probeer het opnieuw.",
       "passwordRequired": "Wachtwoord is verplicht.",
@@ -3870,7 +3912,8 @@
       "highPassFilter": "Hoog-doorlaat filter: {freq} Hz",
       "seekProgress": "Voortgang verder spoelen: {current} / {total} seconden",
       "playbackSpeed": "Afspeelsnelheid",
-      "speed": "Snelheid"
+      "speed": "Snelheid",
+      "loop": "Toggle loop"
     },
     "spectrogram": {
       "notGenerated": "Spectrogram nog niet beschikbaar",
@@ -3949,10 +3992,10 @@
       "clipExtraction": {
         "selectRange": "Click and drag to select a range",
         "playSelection": "Play selected range",
-        "pauseSelection": "Afspelen pauzeren",
-        "reviewSelection": "Spring naar begin van selectie",
-        "selectionStart": "Selectie startgreep",
-        "selectionEnd": "Selectie eindgreep",
+        "pauseSelection": "Pause playback",
+        "reviewSelection": "Jump to start of selection",
+        "selectionStart": "Selection start handle",
+        "selectionEnd": "Selection end handle",
         "lossless": "Lossless",
         "lossy": "Lossy",
         "extractClip": "Download selected clip",
@@ -3961,6 +4004,22 @@
         "extractError": "Failed to extract clip",
         "formatLabel": "Format",
         "rangeLabel": "{start}s – {end}s"
+      },
+      "processing": {
+        "playSelection": "Play selection",
+        "skipToStart": "Skip to selection start",
+        "clearSelection": "Clear selection",
+        "gain": "Gain (dB)",
+        "denoise": "Denoise",
+        "denoiseOff": "Off",
+        "denoiseLight": "Light",
+        "denoiseMedium": "Medium",
+        "denoiseHeavy": "Heavy",
+        "normalize": "Normalize audio",
+        "normalizeTooltip": "EBU R128 Normalization",
+        "export": "Export",
+        "exportOriginal": "Origineel",
+        "processingActive": "Processing active"
       }
     },
     "weatherInfo": {

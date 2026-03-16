@@ -181,9 +181,6 @@ func startDispatcherIfNeeded(pd *pushDispatcher) error {
 	return nil
 }
 
-// GetPushDispatcher returns the dispatcher if initialized
-func GetPushDispatcher() *pushDispatcher { return globalPushDispatcher }
-
 func (d *pushDispatcher) start() error {
 	service := GetService()
 	if service == nil {

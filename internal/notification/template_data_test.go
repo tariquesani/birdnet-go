@@ -6,22 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-// setEnv is a test helper that sets an environment variable and fails the test if it errors
-func setEnv(t *testing.T, key, value string) {
-	t.Helper()
-	err := os.Setenv(key, value)
-	require.NoError(t, err, "Failed to set environment variable %s", key)
-}
-
-// unsetEnv is a test helper that unsets an environment variable and fails the test if it errors
-func unsetEnv(t *testing.T, key string) {
-	t.Helper()
-	err := os.Unsetenv(key)
-	require.NoError(t, err, "Failed to unset environment variable %s", key)
-}
 
 func TestBuildBaseURL(t *testing.T) {
 	// Note: No t.Parallel() here because subtests mutate the global BIRDNET_HOST environment variable
@@ -132,18 +117,8 @@ func TestBuildBaseURL_HostResolutionPriority(t *testing.T) {
 	// Test the explicit priority chain without parallel execution
 	// since we're manipulating environment variables
 
-	// Save original env var
-	oldEnv := os.Getenv("BIRDNET_HOST")
-	defer func() {
-		if oldEnv != "" {
-			setEnv(t, "BIRDNET_HOST", oldEnv)
-		} else {
-			unsetEnv(t, "BIRDNET_HOST")
-		}
-	}()
-
 	// Test 1: Config host has highest priority
-	setEnv(t, "BIRDNET_HOST", "env-host.example.com")
+	t.Setenv("BIRDNET_HOST", "env-host.example.com")
 	result := BuildBaseURL("config-host.example.com", "8080", false)
 	assert.Equal(t, "http://config-host.example.com:8080", result,
 		"Config host should take priority over environment variable")
@@ -154,7 +129,7 @@ func TestBuildBaseURL_HostResolutionPriority(t *testing.T) {
 		"Environment variable should be used when config host is empty")
 
 	// Test 3: Localhost used when both empty
-	unsetEnv(t, "BIRDNET_HOST")
+	t.Setenv("BIRDNET_HOST", "")
 	result = BuildBaseURL("", "8080", false)
 	assert.Equal(t, "http://localhost:8080", result,
 		"Should fall back to localhost when config and env var are both empty")
@@ -219,20 +194,10 @@ func TestBuildBaseURL_RealWorldScenarios(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Save and restore environment
-			oldEnv := os.Getenv("BIRDNET_HOST")
-			defer func() {
-				if oldEnv != "" {
-					setEnv(t, "BIRDNET_HOST", oldEnv)
-				} else {
-					unsetEnv(t, "BIRDNET_HOST")
-				}
-			}()
-
 			if tt.envVar != "" {
-				setEnv(t, "BIRDNET_HOST", tt.envVar)
+				t.Setenv("BIRDNET_HOST", tt.envVar)
 			} else {
-				unsetEnv(t, "BIRDNET_HOST")
+				t.Setenv("BIRDNET_HOST", "")
 			}
 
 			result := BuildBaseURL(tt.host, tt.port, tt.autoTLS)
@@ -276,19 +241,10 @@ func TestBuildBaseURL_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			oldEnv := os.Getenv("BIRDNET_HOST")
-			defer func() {
-				if oldEnv != "" {
-					setEnv(t, "BIRDNET_HOST", oldEnv)
-				} else {
-					unsetEnv(t, "BIRDNET_HOST")
-				}
-			}()
-
 			if tt.envVar != "" {
-				setEnv(t, "BIRDNET_HOST", tt.envVar)
+				t.Setenv("BIRDNET_HOST", tt.envVar)
 			} else {
-				unsetEnv(t, "BIRDNET_HOST")
+				t.Setenv("BIRDNET_HOST", "")
 			}
 
 			result := BuildBaseURL(tt.host, tt.port, tt.autoTLS)

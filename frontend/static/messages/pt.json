@@ -141,7 +141,8 @@
       "nextMonth": "Próximo mês",
       "selectToday": "Selecionar hoje",
       "dateSelected": "Data selecionada: {date}",
-      "calendarNavigation": "Use as teclas de seta para navegar no calendário, Enter para selecionar, Escape para fechar"
+      "calendarNavigation": "Use as teclas de seta para navegar no calendário, Enter para selecionar, Escape para fechar",
+      "resizeHandle": "Arraste para redimensionar"
     },
     "labels": {
       "confidence": "Confiança",
@@ -710,7 +711,10 @@
       "widthFull": "Largura total",
       "widthHalf": "Meia largura",
       "fullWidthOnly": "Apenas largura total",
-      "settings": "Configurações"
+      "settings": "Configurações",
+      "resetDashboard": "Redefinir painel",
+      "resetConfirm": "Redefinir o painel para o layout padrão? Todas as personalizações serão removidas.",
+      "resetting": "Redefinindo..."
     },
     "elements": {
       "banner": "Banner do painel",
@@ -1610,6 +1614,15 @@
           "description": "Reduz detecções falsas exigindo múltiplas confirmações em segmentos de áudio sobrepostos",
           "level": {
             "label": "Nível do Filtro"
+          },
+          "detectionCount": "{count} confirmações necessárias. {description}",
+          "levels": {
+            "off": "Sem filtragem - aceita a primeira detecção imediatamente",
+            "lenient": "Para áudio de baixa qualidade (câmeras RTSP, microfones de webcam)",
+            "moderate": "Equilibrado para configurações típicas de hobby",
+            "balanced": "Comportamento original anterior a setembro de 2025",
+            "strict": "RPi 4+ necessário. Para microfones de alta qualidade",
+            "maximum": "RPi 4+ necessário. Para microfones de grau profissional"
           },
           "hardwareNote": "Os níveis Rigoroso e Máximo requerem configurações de sobreposição mais altas e mais recursos de CPU. RPi 4 ou hardware superior é necessário para esses níveis.",
           "overlapAdjusted": "Configuração de sobreposição ajustada automaticamente para {overlap}s para atender aos requisitos do filtro",
@@ -2945,7 +2958,16 @@
           "label": "Duração da cache (horas)",
           "helpText": "Quanto tempo manter os dados taxonómicos do eBird em cache. A taxonomia muda raramente, portanto durações mais longas reduzem as chamadas à API."
         },
-        "note": "O eBird fornece dados taxonómicos utilizados para classificação de espécies e análises. A chave API é gratuita e pode ser obtida no Cornell Lab of Ornithology."
+        "note": "O eBird fornece dados taxonómicos utilizados para classificação de espécies e análises. A chave API é gratuita e pode ser obtida no Cornell Lab of Ornithology.",
+        "apiKeyInfo": "A personal eBird API key is required to use this integration. You can request a free key from <a href=\"https://ebird.org/api/keygen\" class=\"link link-primary\" target=\"_blank\" rel=\"noopener noreferrer\">ebird.org/api/keygen</a>.",
+        "test": {
+          "button": "Test eBird Connection",
+          "loading": "Testing...",
+          "enabledRequired": "Enable eBird integration first",
+          "apiKeyRequired": "API key is required",
+          "inProgress": "Test in progress...",
+          "description": "Test eBird API connectivity and authentication"
+        }
       }
     },
     "species": {
@@ -3272,8 +3294,8 @@
         "disabled": "Autenticação por senha está desativada"
       },
       "oauth": {
-        "title": "OAuth2 - Autenticação social",
-        "description": "Login único com sua conta existente",
+        "title": "Autenticação externa",
+        "description": "Entrar com um provedor de identidade externo ou OIDC",
         "form": {
           "editTitle": "Editar provedor OAuth",
           "addTitle": "Adicionar provedor OAuth",
@@ -3291,7 +3313,7 @@
           "deleteConfirm": "Tem certeza de que deseja excluir o provedor OAuth {provider}?"
         },
         "noProviders": "Nenhum provedor OAuth configurado",
-        "noProvidersDescription": "Adicione um provedor para habilitar login social com contas do Google, GitHub ou Microsoft.",
+        "noProvidersDescription": "Adicione um provedor para habilitar o login com Google, GitHub, Microsoft, LINE, Kakao ou um provedor OIDC personalizado.",
         "enableProviderLabel": "Habilitar este provedor",
         "getCredentialsLabel": "Obtenha suas credenciais de {provider}",
         "redirectUriTitle": "URI de redirecionamento:",
@@ -3355,6 +3377,25 @@
           "clientSecretLabel": "Client Secret",
           "clientSecretHelpText": "O Client Secret obtido do Kakao Developers Console ao configurar o Kakao Login.",
           "userIdLabel": "ID do usuário"
+        },
+        "oidc": {
+          "title": "OIDC Provider",
+          "enableLabel": "Enable OIDC authentication",
+          "redirectUriTitle": "Redirect URI",
+          "getCredentialsLabel": "Configure in your Identity Provider",
+          "clientIdLabel": "Client ID",
+          "clientIdHelpText": "The client ID from your OIDC identity provider",
+          "clientSecretLabel": "Client Secret",
+          "clientSecretHelpText": "The client secret from your OIDC identity provider",
+          "userIdLabel": "Allowed User (email or sub claim)",
+          "issuerUrlLabel": "Issuer URL",
+          "issuerUrlHelpText": "The issuer URL of your OpenID Connect identity provider (e.g., https://auth.example.com)",
+          "issuerUrlPlaceholder": "https://auth.example.com",
+          "issuerUrlRequired": "Issuer URL is required for OIDC providers",
+          "issuerUrlInvalid": "Issuer URL must be a valid HTTP or HTTPS URL",
+          "scopesLabel": "Scopes",
+          "scopesHelpText": "Comma-separated list of OIDC scopes (default: openid, profile, email)",
+          "scopesPlaceholder": "openid, profile, email"
         }
       },
       "bypassAuthentication": {
@@ -3728,6 +3769,7 @@
     "continueWithMicrosoft": "Continuar com Microsoft",
     "continueWithLine": "Continuar com LINE",
     "continueWithKakao": "Continuar com Kakao",
+    "continueWithOidc": "Continue with OIDC",
     "errors": {
       "loginFailed": "Falha no login. Por favor, verifique sua senha e tente novamente.",
       "passwordRequired": "A senha é obrigatória.",
@@ -3870,7 +3912,8 @@
       "highPassFilter": "Controle de filtro passa-alta: {freq} Hz",
       "seekProgress": "Progresso de busca de áudio: {current} / {total} segundos",
       "playbackSpeed": "Velocidade de reprodução",
-      "speed": "Velocidade"
+      "speed": "Velocidade",
+      "loop": "Toggle loop"
     },
     "spectrogram": {
       "notGenerated": "Espectrograma ainda não gerado",
@@ -3949,18 +3992,34 @@
       "clipExtraction": {
         "selectRange": "Click and drag to select a range",
         "playSelection": "Play selected range",
-        "pauseSelection": "Pausar reprodução",
-        "reviewSelection": "Ir para o início da seleção",
-        "selectionStart": "Alça de início da seleção",
-        "selectionEnd": "Alça de fim da seleção",
-        "lossless": "Sem perdas",
-        "lossy": "Com perdas",
+        "pauseSelection": "Pause playback",
+        "reviewSelection": "Jump to start of selection",
+        "selectionStart": "Selection start handle",
+        "selectionEnd": "Selection end handle",
+        "lossless": "Lossless",
+        "lossy": "Lossy",
         "extractClip": "Download selected clip",
         "clearSelection": "Clear selection",
         "extracting": "Extracting clip...",
         "extractError": "Failed to extract clip",
         "formatLabel": "Format",
         "rangeLabel": "{start}s – {end}s"
+      },
+      "processing": {
+        "playSelection": "Play selection",
+        "skipToStart": "Skip to selection start",
+        "clearSelection": "Clear selection",
+        "gain": "Gain (dB)",
+        "denoise": "Denoise",
+        "denoiseOff": "Off",
+        "denoiseLight": "Light",
+        "denoiseMedium": "Medium",
+        "denoiseHeavy": "Heavy",
+        "normalize": "Normalize audio",
+        "normalizeTooltip": "EBU R128 Normalization",
+        "export": "Export",
+        "exportOriginal": "Original",
+        "processingActive": "Processing active"
       }
     },
     "weatherInfo": {

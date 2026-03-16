@@ -352,12 +352,14 @@ export interface WeatherSettings {
 
 // New array-based OAuth provider configuration
 export interface OAuthProviderConfig {
-  provider: 'google' | 'github' | 'microsoft' | 'line' | 'kakao';
+  provider: 'google' | 'github' | 'microsoft' | 'line' | 'kakao' | 'oidc';
   enabled: boolean;
   clientId: string;
   clientSecret: string;
   redirectUri?: string;
   userId?: string;
+  issuerUrl?: string; // OIDC only: IdP discovery URL
+  scopes?: string[]; // OIDC only: custom scopes (defaults: openid, profile, email)
 }
 
 export interface SecuritySettings {
@@ -1001,6 +1003,9 @@ export const hasUnsavedChanges = derived(
   settingsStore,
   $store => JSON.stringify($store.formData) !== JSON.stringify($store.originalData)
 );
+
+// Validation errors store - pages can add errors to prevent saving
+export const settingsValidationErrors = writable<string[]>([]);
 
 export const currentSection = derived(settingsStore, $store => $store.activeSection);
 

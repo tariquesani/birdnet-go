@@ -131,7 +131,8 @@
       "calendarNavigation": "Použite šípky na navigáciu v kalendári, Enter na výber, Escape na zavretie",
       "downloadCsv": "Stiahnuť zoznam druhov ako CSV",
       "visitEbirdLink": "Otvoriť eBird.org v novej karte",
-      "learnEbirdTaxonomyLink": "Otvoriť taxonómiu eBird v novej karte"
+      "learnEbirdTaxonomyLink": "Otvoriť taxonómiu eBird v novej karte",
+      "resizeHandle": "Potiahnutím zmeníte veľkosť"
     },
     "labels": {
       "confidence": "Istota",
@@ -710,7 +711,10 @@
       "widthFull": "Plná šírka",
       "widthHalf": "Polovičná šírka",
       "fullWidthOnly": "Iba plná šírka",
-      "settings": "Nastavenia"
+      "settings": "Nastavenia",
+      "resetDashboard": "Obnoviť panel",
+      "resetConfirm": "Obnoviť panel na predvolené rozloženie? Všetky úpravy budú odstránené.",
+      "resetting": "Obnovuje sa..."
     },
     "elements": {
       "banner": "Banner panela",
@@ -1453,6 +1457,15 @@
           "description": "Znížiť počet falošných detekcií vyžadovaním viacerých potvrdení naprieč prekrývajúcimi sa zvukovými segmentmi",
           "level": {
             "label": "Úroveň filtra"
+          },
+          "detectionCount": "Vyžadovaných {count} potvrdení. {description}",
+          "levels": {
+            "off": "Bez filtrovania - okamžite prijme prvú detekciu",
+            "lenient": "Pre nízku kvalitu zvuku (RTSP kamery, mikrofóny webkamier)",
+            "moderate": "Vyvážené pre typické hobby konfigurácie",
+            "balanced": "Pôvodné správanie pred septembrom 2025",
+            "strict": "Vyžaduje sa RPi 4+. Pre vysokokvalitné mikrofóny",
+            "maximum": "Vyžaduje sa RPi 4+. Pre mikrofóny profesionálnej triedy"
           },
           "hardwareNote": "Prísne a maximálne úrovne vyžadujú vyššie nastavenia prekrytia a viac prostriedkov CPU. Pre tieto úrovne sa vyžaduje hardvér RPi 4 alebo lepší.",
           "overlapAdjusted": "Nastavenie prekrytia bolo automaticky upravené na {overlap}s, aby spĺňalo požiadavky filtra",
@@ -2440,7 +2453,16 @@
           "label": "Trvanie vyrovnávacej pamäte (hodiny)",
           "helpText": "Ako dlho uchovávať taxonomické údaje z eBird vo vyrovnávacej pamäti. Taxonómia sa mení zriedkavo, preto dlhšie doby cache znižujú počet volaní API."
         },
-        "note": "eBird poskytuje taxonomické údaje používané na klasifikáciu druhov a analýzy. API kľúč je bezplatný a dostupný z Cornell Lab of Ornithology."
+        "note": "eBird poskytuje taxonomické údaje používané na klasifikáciu druhov a analýzy. API kľúč je bezplatný a dostupný z Cornell Lab of Ornithology.",
+        "apiKeyInfo": "A personal eBird API key is required to use this integration. You can request a free key from <a href=\"https://ebird.org/api/keygen\" class=\"link link-primary\" target=\"_blank\" rel=\"noopener noreferrer\">ebird.org/api/keygen</a>.",
+        "test": {
+          "button": "Test eBird Connection",
+          "loading": "Testing...",
+          "enabledRequired": "Enable eBird integration first",
+          "apiKeyRequired": "API key is required",
+          "inProgress": "Test in progress...",
+          "description": "Test eBird API connectivity and authentication"
+        }
       }
     },
     "audio": {
@@ -2820,8 +2842,8 @@
         "passwordHelpText": "Obmedziť prístup k nastaveniam pomocou hesla."
       },
       "oauth": {
-        "title": "Sociálna autentifikácia OAuth2",
-        "description": "Jednotné prihlásenie (SSO) na prihlásenie pomocou vášho existujúceho účtu",
+        "title": "Externá autentifikácia",
+        "description": "Prihlásenie pomocou externého poskytovateľa identity alebo OIDC",
         "form": {
           "editTitle": "Upraviť poskytovateľa OAuth",
           "addTitle": "Pridať poskytovateľa OAuth",
@@ -2839,7 +2861,7 @@
           "deleteConfirm": "Naozaj chcete odstrániť poskytovateľa OAuth {provider}?"
         },
         "noProviders": "Žiadni nakonfigurovaní poskytovatelia OAuth",
-        "noProvidersDescription": "Pridajte poskytovateľa na povolenie sociálneho prihlásenia pomocou účtov Google, GitHub, Microsoft, LINE alebo Kakao.",
+        "noProvidersDescription": "Pridajte poskytovateľa na povolenie prihlásenia cez Google, GitHub, Microsoft, LINE, Kakao alebo vlastného poskytovateľa OIDC.",
         "enableProviderLabel": "Povoliť tohto poskytovateľa",
         "getCredentialsLabel": "Získajte svoje prihlasovacie údaje od {provider}",
         "redirectUriTitle": "Redirect URI:",
@@ -2903,6 +2925,25 @@
           "clientSecretLabel": "Client Secret",
           "clientSecretHelpText": "Client Secret získaný z Kakao Developers Console pri nastavovaní Kakao Login.",
           "userIdLabel": "ID používateľa"
+        },
+        "oidc": {
+          "title": "OIDC Provider",
+          "enableLabel": "Enable OIDC authentication",
+          "redirectUriTitle": "Redirect URI",
+          "getCredentialsLabel": "Configure in your Identity Provider",
+          "clientIdLabel": "Client ID",
+          "clientIdHelpText": "The client ID from your OIDC identity provider",
+          "clientSecretLabel": "Client Secret",
+          "clientSecretHelpText": "The client secret from your OIDC identity provider",
+          "userIdLabel": "Allowed User (email or sub claim)",
+          "issuerUrlLabel": "Issuer URL",
+          "issuerUrlHelpText": "The issuer URL of your OpenID Connect identity provider (e.g., https://auth.example.com)",
+          "issuerUrlPlaceholder": "https://auth.example.com",
+          "issuerUrlRequired": "Issuer URL is required for OIDC providers",
+          "issuerUrlInvalid": "Issuer URL must be a valid HTTP or HTTPS URL",
+          "scopesLabel": "Scopes",
+          "scopesHelpText": "Comma-separated list of OIDC scopes (default: openid, profile, email)",
+          "scopesPlaceholder": "openid, profile, email"
         }
       },
       "bypassAuthentication": {
@@ -3559,6 +3600,7 @@
     "continueWithMicrosoft": "Pokračovať cez Microsoft",
     "continueWithLine": "Pokračovať cez LINE",
     "continueWithKakao": "Pokračovať cez Kakao",
+    "continueWithOidc": "Continue with OIDC",
     "errors": {
       "loginFailed": "Prihlásenie zlyhalo. Skontrolujte svoje heslo a skúste to znova.",
       "passwordRequired": "Heslo je povinné.",
@@ -3701,7 +3743,8 @@
       "highPassFilter": "Ovládanie hornopriepustného filtra: {freq} Hz",
       "seekProgress": "Posun v nahrávke: {current} / {total} sekúnd",
       "playbackSpeed": "Rýchlosť prehrávania",
-      "speed": "Rýchlosť"
+      "speed": "Rýchlosť",
+      "loop": "Toggle loop"
     },
     "spectrogram": {
       "notGenerated": "Spektrogram ešte nebol vygenerovaný",
@@ -3780,18 +3823,34 @@
       "clipExtraction": {
         "selectRange": "Click and drag to select a range",
         "playSelection": "Play selected range",
-        "pauseSelection": "Pozastaviť prehrávanie",
-        "reviewSelection": "Prejsť na začiatok výberu",
-        "selectionStart": "Rukoväť začiatku výberu",
-        "selectionEnd": "Rukoväť konca výberu",
-        "lossless": "Bezstratový",
-        "lossy": "Stratový",
+        "pauseSelection": "Pause playback",
+        "reviewSelection": "Jump to start of selection",
+        "selectionStart": "Selection start handle",
+        "selectionEnd": "Selection end handle",
+        "lossless": "Lossless",
+        "lossy": "Lossy",
         "extractClip": "Download selected clip",
         "clearSelection": "Clear selection",
         "extracting": "Extracting clip...",
         "extractError": "Failed to extract clip",
         "formatLabel": "Format",
         "rangeLabel": "{start}s – {end}s"
+      },
+      "processing": {
+        "playSelection": "Play selection",
+        "skipToStart": "Skip to selection start",
+        "clearSelection": "Clear selection",
+        "gain": "Gain (dB)",
+        "denoise": "Denoise",
+        "denoiseOff": "Off",
+        "denoiseLight": "Light",
+        "denoiseMedium": "Medium",
+        "denoiseHeavy": "Heavy",
+        "normalize": "Normalize audio",
+        "normalizeTooltip": "EBU R128 Normalization",
+        "export": "Export",
+        "exportOriginal": "Originál",
+        "processingActive": "Processing active"
       }
     },
     "weatherInfo": {

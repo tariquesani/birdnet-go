@@ -30,8 +30,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { cn } from '$lib/utils/cn.js';
-  import { Play, Pause, Download, XCircle, SkipBack, ChevronDown } from '@lucide/svelte';
+  import { Play, Pause, Download, XCircle } from '@lucide/svelte';
   import AudioSettingsButton from '$lib/desktop/features/dashboard/components/AudioSettingsButton.svelte';
+  import AudioToolbar from './AudioToolbar.svelte';
   import { t } from '$lib/i18n';
   import { loggers } from '$lib/utils/logger';
   import { useDelayedLoading } from '$lib/utils/delayedLoading.svelte.js';
@@ -119,8 +120,10 @@
   // Audio and UI elements
   let audioElement: HTMLAudioElement;
   let playerContainer: HTMLDivElement;
+  // svelte-ignore non_reactive_update
   let playPauseButton!: HTMLButtonElement; // Template-only binding
-  let progressBar: HTMLDivElement;
+  // svelte-ignore non_reactive_update
+  let progressBar: HTMLDivElement; // Template-only binding
   // svelte-ignore non_reactive_update
   let spectrogramImage: HTMLImageElement; // Template-only binding
 
@@ -215,6 +218,7 @@
   let isDragSelecting = $state(false);
   let draggingHandle = $state<'start' | 'end' | null>(null);
   let dragOriginX = $state(0);
+  let mouseDownInPlayer = false; // Track if mousedown originated in the player container
   let isScrubbing = $state(false);
   let scrubStartTime = $state(0); // time at drag origin when scrubbing
   let scrubSelectionDuration = $state(0); // locked selection width during scrub
@@ -225,13 +229,27 @@
   let extractionError = $state<string | null>(null);
   let isPlayingSelection = $state(false);
   let selectionPlaybackTimeout: ReturnType<typeof setTimeout> | undefined;
-  let showFormatMenu = $state(false);
-  let formatMenuRef: HTMLDivElement | undefined = $state();
+  let loopEnabled = $state(false);
+
+  // Processing state
+  let processingDenoise = $state('');
+  let processingNormalize = $state(false);
+  let isProcessing = $state(false);
+  let processedAudioUrl = $state<string | null>(null);
+  let processedSpectrogramUrl = $state<string | null>(null);
+  let isSpectrogramProcessing = $state(false);
+  let processingActive = $derived(processingDenoise !== '' || processingNormalize);
+  let processAbortController: AbortController | null = null;
+  let processDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Constants
   const GAIN_MAX_DB = 24;
   const FILTER_HP_MIN_FREQ = 20;
   const FILTER_HP_MAX_FREQ = 10000;
+
+  // Frequency scale overlay constants (sox resamples to 24kHz, Nyquist = 12kHz)
+  const FREQ_NYQUIST_KHZ = 12;
+  const FREQ_TICKS_KHZ = [12, 10, 8, 6, 5, 4, 3, 2, 1];
   // PLAY_END_DELAY_MS imported from $lib/utils/audio
   // Spinner delay is now handled by useDelayedLoading utility
 
@@ -246,10 +264,12 @@
   );
 
   // Active URL with cache-busting for reactive reloads (retry count + cache key)
+  // Uses processed spectrogram URL when audio processing is active
   const spectrogramUrl = $derived(
-    spectrogramBaseUrl
-      ? `${spectrogramBaseUrl}&cache=${spectrogramCacheKey}${spectrogramRetryCount > 0 ? `&retry=${spectrogramRetryCount}` : ''}`
-      : null
+    processedSpectrogramUrl ??
+      (spectrogramBaseUrl
+        ? `${spectrogramBaseUrl}&cache=${spectrogramCacheKey}${spectrogramRetryCount > 0 ? `&retry=${spectrogramRetryCount}` : ''}`
+        : null)
   );
 
   const playPauseId = $derived(`playPause-${detectionId}`);
@@ -294,16 +314,7 @@
   const TOUCH_HANDLE_THRESHOLD = 24; // Pixels — larger snap zone for touch
   const MIN_SELECTION_DURATION = 0.05; // Seconds — minimum useful selection
   const ARROW_KEY_STEP = 0.1; // Seconds — keyboard handle adjustment
-
-  // Supported clip extraction formats (lossless first, then lossy)
-  const CLIP_FORMATS = [
-    { value: 'wav', label: 'WAV', lossless: true },
-    { value: 'flac', label: 'FLAC', lossless: true },
-    { value: 'alac', label: 'ALAC', lossless: true },
-    { value: 'mp3', label: 'MP3', lossless: false },
-    { value: 'opus', label: 'Opus', lossless: false },
-    { value: 'aac', label: 'AAC', lossless: false },
-  ] as const;
+  const PROCESS_DEBOUNCE_MS = 300; // Debounce delay for server-side processing requests
 
   // Check if a pointer X position is near a selection handle, returning which handle
   const detectHandleGrab = (clientX: number, thresholdPx: number): 'start' | 'end' | null => {
@@ -338,6 +349,10 @@
     return timeSec >= lo && timeSec <= hi;
   };
 
+  const hasActiveSelection = (): boolean => {
+    return selectionStartSec !== null && selectionEndSec !== null;
+  };
+
   const handleSelectionMouseDown = (e: MouseEvent) => {
     if (!enableClipExtraction || duration <= 0) return;
     if (e.button !== 0) return;
@@ -347,6 +362,7 @@
     if (target.closest('button, select, a, [role="button"]')) return;
 
     dragOriginX = e.clientX;
+    mouseDownInPlayer = true;
 
     // Check if clicking near an existing handle
     const handle = detectHandleGrab(e.clientX, MOUSE_HANDLE_THRESHOLD);
@@ -367,10 +383,8 @@
       return;
     }
 
-    // Start new selection
-    isDragSelecting = true;
-    selectionStartSec = clickTime;
-    selectionEndSec = clickTime;
+    // Don't start selection yet — wait for mousemove to confirm it's a drag.
+    // Single click will seek the playhead in mouseUp handler.
     e.preventDefault();
   };
 
@@ -420,11 +434,27 @@
     if (isDragSelecting) {
       selectionEndSec = xToTime(e.clientX);
       e.preventDefault();
+      return;
+    }
+
+    // Start new selection only after dragging beyond threshold (and mousedown was in player)
+    if (
+      mouseDownInPlayer &&
+      e.buttons === 1 &&
+      Math.abs(e.clientX - dragOriginX) >= MIN_DRAG_DISTANCE
+    ) {
+      isDragSelecting = true;
+      selectionStartSec = xToTime(dragOriginX);
+      selectionEndSec = xToTime(e.clientX);
+      e.preventDefault();
     }
   };
 
   const handleSelectionMouseUp = (e: MouseEvent) => {
     if (!enableClipExtraction) return;
+
+    const wasInPlayer = mouseDownInPlayer;
+    mouseDownInPlayer = false;
 
     if (draggingHandle) {
       draggingHandle = null;
@@ -438,14 +468,27 @@
 
     if (isDragSelecting) {
       isDragSelecting = false;
+      normalizeSelection();
+      return;
+    }
 
-      if (Math.abs(e.clientX - dragOriginX) < MIN_DRAG_DISTANCE) {
-        selectionStartSec = null;
-        selectionEndSec = null;
+    // Single click (no drag) — seek or clear selection
+    // Only if the mousedown originated within the spectrogram container
+    if (wasInPlayer && Math.abs(e.clientX - dragOriginX) < MIN_DRAG_DISTANCE) {
+      const clickTime = xToTime(e.clientX);
+
+      // If there's an active selection and click is outside it, clear the selection
+      if (hasActiveSelection() && !isInsideSelection(clickTime)) {
+        clearSelection();
         return;
       }
 
-      normalizeSelection();
+      // Seek playhead to clicked position
+      if (audioElement && duration > 0) {
+        audioElement.currentTime = clickTime;
+        currentTime = clickTime;
+        progress = (clickTime / duration) * 100;
+      }
     }
   };
 
@@ -456,7 +499,6 @@
     isDragSelecting = false;
     draggingHandle = null;
     isScrubbing = false;
-    showFormatMenu = false;
     extractionError = null;
   };
 
@@ -556,17 +598,29 @@
       .play()
       .then(() => {
         isPlayingSelection = true;
-        const durationMs = ((end - start) / playbackSpeed) * 1000;
-        selectionPlaybackTimeout = setTimeout(() => {
-          if (audioElement && isPlayingSelection) {
-            audioElement.pause();
-            isPlayingSelection = false;
-          }
-        }, durationMs);
+        scheduleSelectionEnd(start, end);
       })
       .catch((err: unknown) => {
         logger.error('Failed to play selection:', err);
       });
+  };
+
+  const scheduleSelectionEnd = (start: number, end: number) => {
+    if (selectionPlaybackTimeout) {
+      clearTimeout(selectionPlaybackTimeout);
+    }
+    const durationMs = ((end - start) / playbackSpeed) * 1000;
+    selectionPlaybackTimeout = setTimeout(() => {
+      if (!audioElement || !isPlayingSelection) return;
+      if (loopEnabled) {
+        // Loop: restart from selection start
+        audioElement.currentTime = start;
+        scheduleSelectionEnd(start, end);
+      } else {
+        audioElement.pause();
+        isPlayingSelection = false;
+      }
+    }, durationMs);
   };
 
   const stopSelection = () => {
@@ -585,21 +639,18 @@
     audioElement.currentTime = Math.min(selectionStartSec, selectionEndSec);
   };
 
-  const toggleFormatMenu = () => {
-    showFormatMenu = !showFormatMenu;
-  };
-
-  const selectFormatAndExtract = (format: string) => {
-    extractionFormat = format;
-    showFormatMenu = false;
-    extractClip();
-  };
-
-  const extractClip = async () => {
-    if (selectionStartSec === null || selectionEndSec === null || isExtracting) return;
-
-    const start = Math.min(selectionStartSec, selectionEndSec);
-    const end = Math.max(selectionStartSec, selectionEndSec);
+  const extractClip = async (startOverride?: number, endOverride?: number) => {
+    const start =
+      startOverride ??
+      (selectionStartSec !== null && selectionEndSec !== null
+        ? Math.min(selectionStartSec, selectionEndSec)
+        : null);
+    const end =
+      endOverride ??
+      (selectionStartSec !== null && selectionEndSec !== null
+        ? Math.max(selectionStartSec, selectionEndSec)
+        : null);
+    if (start === null || end === null || isExtracting) return;
 
     isExtracting = true;
     extractionError = null;
@@ -610,7 +661,14 @@
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ start, end, format: extractionFormat }),
+          body: JSON.stringify({
+            start,
+            end,
+            format: extractionFormat,
+            normalize: processingNormalize,
+            denoise: processingDenoise,
+            gain_db: gainValue,
+          }),
         }
       );
 
@@ -658,6 +716,197 @@
       isExtracting = false;
     }
   };
+
+  // --- Audio processing (denoise / normalize preview) ---
+
+  function triggerProcessing() {
+    if (processDebounceTimer) clearTimeout(processDebounceTimer);
+    processDebounceTimer = setTimeout(() => {
+      processAudio();
+    }, PROCESS_DEBOUNCE_MS);
+  }
+
+  async function processAudio() {
+    // Abort any in-flight processing request
+    if (processAbortController) {
+      processAbortController.abort();
+    }
+
+    if (!processingDenoise && !processingNormalize) {
+      // No server-side processing needed — revert to original audio and spectrogram
+      if (processedAudioUrl) {
+        URL.revokeObjectURL(processedAudioUrl);
+        processedAudioUrl = null;
+      }
+      if (processedSpectrogramUrl) {
+        URL.revokeObjectURL(processedSpectrogramUrl);
+        processedSpectrogramUrl = null;
+      }
+      if (audioElement) {
+        const pos = audioElement.currentTime;
+        audioElement.src = audioUrl;
+        audioElement.currentTime = pos;
+      }
+      return;
+    }
+
+    isProcessing = true;
+    // Pause playback while backend applies filters
+    if (isPlaying && audioElement) {
+      audioElement.pause();
+      isPlaying = false;
+    }
+    const controller = new AbortController();
+    processAbortController = controller;
+
+    try {
+      const response = await fetch(
+        buildAppUrl(`/api/v2/audio/${encodeURIComponent(detectionId)}/process`),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            normalize: processingNormalize,
+            denoise: processingDenoise,
+            gain_db: 0, // gain applied client-side via Web Audio API
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Processing failed: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+
+      // Discard result if a newer request superseded this one
+      if (processAbortController !== controller) return;
+
+      // Revoke previous object URL to prevent memory leak
+      if (processedAudioUrl) {
+        URL.revokeObjectURL(processedAudioUrl);
+      }
+
+      processedAudioUrl = URL.createObjectURL(blob);
+
+      if (audioElement) {
+        const pos = audioElement.currentTime;
+        audioElement.src = processedAudioUrl;
+        audioElement.currentTime = pos;
+      }
+
+      // Update spectrogram to reflect processed audio
+      if (enableClipExtraction) {
+        updateProcessedSpectrogram(controller.signal);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return; // Superseded by newer request, don't touch state
+      }
+      // Discard error handling if a newer request superseded this one
+      if (processAbortController !== controller) return;
+
+      logger.error('Audio processing failed', err as Error);
+      // Revert to original audio and reset processing state
+      processingDenoise = '';
+      processingNormalize = false;
+      if (processedAudioUrl) {
+        URL.revokeObjectURL(processedAudioUrl);
+        processedAudioUrl = null;
+      }
+      if (processedSpectrogramUrl) {
+        URL.revokeObjectURL(processedSpectrogramUrl);
+        processedSpectrogramUrl = null;
+      }
+      if (audioElement) {
+        const pos = audioElement.currentTime;
+        audioElement.src = audioUrl;
+        audioElement.currentTime = pos;
+      }
+    } finally {
+      // Only clear state if this is still the active request (avoid stale finally)
+      if (processAbortController === controller) {
+        isProcessing = false;
+        processAbortController = null;
+      }
+    }
+  }
+
+  async function updateProcessedSpectrogram(signal: AbortSignal) {
+    isSpectrogramProcessing = true;
+    try {
+      const response = await fetch(
+        buildAppUrl(
+          `/api/v2/spectrogram/${encodeURIComponent(detectionId)}/process?size=${spectrogramSize}${spectrogramRaw ? '&raw=true' : ''}`
+        ),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal,
+          body: JSON.stringify({
+            normalize: processingNormalize,
+            denoise: processingDenoise,
+            gain_db: 0,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        logger.warn('Processed spectrogram generation failed', { status: response.status });
+        return;
+      }
+
+      if (signal.aborted) return;
+
+      const blob = await response.blob();
+      if (signal.aborted) return;
+
+      // Revoke previous processed spectrogram URL
+      if (processedSpectrogramUrl) {
+        URL.revokeObjectURL(processedSpectrogramUrl);
+      }
+      processedSpectrogramUrl = URL.createObjectURL(blob);
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') return;
+      logger.warn('Failed to update processed spectrogram', err as Error);
+    } finally {
+      isSpectrogramProcessing = false;
+    }
+  }
+
+  function handleDenoiseChange(preset: string) {
+    processingDenoise = preset;
+    triggerProcessing();
+  }
+
+  function handleNormalizeToggle() {
+    processingNormalize = !processingNormalize;
+    triggerProcessing();
+  }
+
+  function handleToolbarExport(format: string) {
+    if (format === 'original') {
+      // Download original file directly — empty download attribute lets the
+      // browser use the server's Content-Disposition filename
+      const a = document.createElement('a');
+      a.href = audioUrl;
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+
+    extractionFormat = format;
+    if (selectionStartSec === null || selectionEndSec === null) {
+      // No selection — export full file (guard against unloaded metadata)
+      if (duration <= 0) return;
+      extractClip(0, duration);
+    } else {
+      extractClip();
+    }
+  }
 
   const clearPlayEndTimeout = () => {
     if (playEndTimeout) {
@@ -752,9 +1001,15 @@
   };
 
   const handleProgressClick = (event: MouseEvent) => {
-    if (!audioElement || !progressBar) return;
+    if (!audioElement || duration <= 0) return;
 
-    const rect = progressBar.getBoundingClientRect();
+    // Use the toolbar's own progress bar if the event target is inside one,
+    // otherwise fall back to playerContainer (always rendered).
+    const targetEl = (event.target as HTMLElement)?.closest('.progress-bar') as HTMLElement | null;
+    const refEl = targetEl ?? progressBar ?? playerContainer;
+    if (!refEl) return;
+
+    const rect = refEl.getBoundingClientRect();
     const clickX = event.clientX - rect.left;
     const clickPercent = clickX / rect.width;
     const newTime = clickPercent * duration;
@@ -1157,12 +1412,20 @@
 
       previousSpectrogramBaseUrl = spectrogramBaseUrl;
 
+      // Mark as loading so the img element stays hidden until the image is ready
+      spectrogramLoader.setLoading(true);
+
       // Reset retry/cache state for new spectrogram
       spectrogramRetryCount = 0;
       spectrogramCacheKey = 0;
       clearSpectrogramRetryTimer();
       // Abort any in-flight status polling when URL changes
       clearStatusPollTimer();
+      // Revoke stale processed spectrogram from previous detection
+      if (processedSpectrogramUrl) {
+        URL.revokeObjectURL(processedSpectrogramUrl);
+        processedSpectrogramUrl = null;
+      }
     }
   });
 
@@ -1174,6 +1437,22 @@
       if (audioElement.src !== absoluteUrl) {
         debugLog('audioUrl changed, updating src', { from: audioElement.src, to: audioUrl });
         audioElement.src = audioUrl;
+        // Cancel in-flight processing and clean up state from previous audio
+        if (processDebounceTimer) {
+          clearTimeout(processDebounceTimer);
+          processDebounceTimer = null;
+        }
+        if (processAbortController) {
+          processAbortController.abort();
+          processAbortController = null;
+        }
+        if (processedAudioUrl) {
+          URL.revokeObjectURL(processedAudioUrl);
+          processedAudioUrl = null;
+        }
+        processingDenoise = '';
+        processingNormalize = false;
+        isProcessing = false;
         // Reset playback state for new audio
         isPlaying = false;
         currentTime = 0;
@@ -1254,6 +1533,17 @@
       });
 
       addTrackedEventListener(audioElement, 'ended', () => {
+        // When playing a selection, scheduleSelectionEnd handles looping — ignore ended event
+        if (isPlayingSelection) return;
+
+        if (loopEnabled && audioElement) {
+          // Loop full audio: restart from beginning
+          audioElement.currentTime = 0;
+          audioElement.play().catch((err: unknown) => {
+            logger.warn('Loop playback failed', err as Error);
+          });
+          return;
+        }
         isPlaying = false;
         stopInterval();
         // Set delay before signaling play end
@@ -1363,18 +1653,9 @@
         e: KeyboardEvent
       ) => {
         if (e.key === 'Escape') {
-          if (showFormatMenu) {
-            showFormatMenu = false;
-          } else if (selectionStartSec !== null || selectionEndSec !== null) {
+          if (selectionStartSec !== null || selectionEndSec !== null) {
             clearSelection();
           }
-        }
-      }) as EventListener);
-
-      // Close format menu on click outside
-      addTrackedEventListener(document as unknown as HTMLElement, 'mousedown', ((e: MouseEvent) => {
-        if (showFormatMenu && formatMenuRef && !formatMenuRef.contains(e.target as Node)) {
-          showFormatMenu = false;
         }
       }) as EventListener);
 
@@ -1447,6 +1728,24 @@
     };
   });
 
+  // Cleanup processing resources on component destroy
+  $effect(() => {
+    return () => {
+      if (processedAudioUrl) {
+        URL.revokeObjectURL(processedAudioUrl);
+      }
+      if (processedSpectrogramUrl) {
+        URL.revokeObjectURL(processedSpectrogramUrl);
+      }
+      if (processDebounceTimer) {
+        clearTimeout(processDebounceTimer);
+      }
+      if (processAbortController) {
+        processAbortController.abort();
+      }
+    };
+  });
+
   // Debug effect to track spectrogram loader state changes
   $effect(() => {
     debugLog('loader state changed', {
@@ -1483,7 +1782,7 @@
 >
   {#if spectrogramUrl}
     <!-- Screen reader announcement for loading state -->
-    <div class="sr-only" role="status" aria-live="polite">
+    <div class="sr-only" role="status">
       {spectrogramLoader.loading
         ? t('components.audio.spectrogramLoading')
         : t('components.audio.spectrogramLoaded')}
@@ -1502,13 +1801,33 @@
       </div>
     {/if}
 
+    <!-- Always render the img so the browser cache works across state transitions -->
+    <img
+      bind:this={spectrogramImage}
+      id={`spectrogram-${detectionId}`}
+      src={spectrogramUrl}
+      alt="Audio spectrogram"
+      decoding="async"
+      class={responsive
+        ? enableClipExtraction
+          ? 'w-full h-auto'
+          : 'w-full h-auto object-contain rounded-md border border-[var(--color-base-300)]'
+        : 'w-full h-full object-fill rounded-md border border-[var(--color-base-300)]'}
+      class:invisible={spectrogramLoader.loading || spectrogramLoader.error}
+      class:select-none={enableClipExtraction}
+      draggable={enableClipExtraction ? 'false' : undefined}
+      style={responsive
+        ? ''
+        : `width: ${typeof width === 'number' ? width + 'px' : width}; height: ${typeof height === 'number' ? height + 'px' : height};`}
+      width={responsive ? 400 : undefined}
+      onload={handleSpectrogramLoad}
+      onerror={handleSpectrogramError}
+    />
+
     {#if spectrogramLoader.error}
-      <!-- Error placeholder for failed spectrogram -->
+      <!-- Error overlay for failed spectrogram -->
       <div
-        class="flex items-center justify-center bg-[var(--color-base-200)] rounded-md border border-[var(--color-base-300)]"
-        style={responsive
-          ? 'height: 80px;'
-          : `width: ${typeof width === 'number' ? width + 'px' : width}; height: ${typeof height === 'number' ? height + 'px' : height};`}
+        class="absolute inset-0 flex items-center justify-center bg-[var(--color-base-200)] rounded-md border border-[var(--color-base-300)]"
       >
         <div class="text-center p-2">
           <XCircle
@@ -1521,7 +1840,7 @@
         </div>
       </div>
     {:else if spectrogramStatus?.status === 'queued' || spectrogramStatus?.status === 'generating'}
-      <!-- Show generation status -->
+      <!-- Generation status overlay -->
       <div
         class="absolute inset-0 flex flex-col items-center justify-center bg-[var(--color-base-200)]/90 rounded-md border border-[var(--color-base-300)] p-2"
       >
@@ -1551,29 +1870,34 @@
           </div>
         {/if}
       </div>
-    {:else}
-      <img
-        bind:this={spectrogramImage}
-        id={`spectrogram-${detectionId}`}
-        src={spectrogramUrl}
-        alt="Audio spectrogram"
-        loading="lazy"
-        decoding="async"
-        fetchpriority="low"
-        class={responsive
-          ? 'w-full h-auto object-contain rounded-md border border-[var(--color-base-300)]'
-          : 'w-full h-full object-fill rounded-md border border-[var(--color-base-300)]'}
-        class:opacity-0={spectrogramLoader.loading}
-        class:select-none={enableClipExtraction}
-        draggable={enableClipExtraction ? 'false' : undefined}
-        style={responsive
-          ? ''
-          : `width: ${typeof width === 'number' ? width + 'px' : width}; height: ${typeof height === 'number' ? height + 'px' : height};`}
-        width={responsive ? 400 : undefined}
-        onload={handleSpectrogramLoad}
-        onerror={handleSpectrogramError}
-      />
     {/if}
+  {/if}
+
+  <!-- Spectrogram processing overlay -->
+  {#if isSpectrogramProcessing}
+    <div
+      class="absolute inset-0 flex items-center justify-center bg-black/40 rounded-md pointer-events-none"
+    >
+      <div
+        class="loading loading-spinner loading-sm text-white"
+        role="status"
+        aria-label={t('components.audio.spectrogramGeneratingAria')}
+      ></div>
+    </div>
+  {/if}
+
+  <!-- Frequency scale overlay (linear 0-12kHz, sox resamples to 24kHz) -->
+  {#if showSpectrogram && spectrogramUrl && !spectrogramLoader.error}
+    {#each FREQ_TICKS_KHZ as freq (freq)}
+      <span class="freq-label" style:bottom="{(freq / FREQ_NYQUIST_KHZ) * 100}%" aria-hidden="true"
+        >{freq}k</span
+      >
+      <div
+        class="freq-line"
+        style:bottom="{(freq / FREQ_NYQUIST_KHZ) * 100}%"
+        aria-hidden="true"
+      ></div>
+    {/each}
   {/if}
 
   <!-- Audio element is created dynamically in onMount for iOS Safari compatibility -->
@@ -1701,193 +2025,90 @@
       >
         <div class="w-0.5 h-full bg-primary"></div>
       </div>
-
-      <!-- Selection toolbar -->
-      {@const toolbarLeftPct = (startPct + endPct) / 2}
-      <div
-        class="absolute z-20 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-[var(--color-base-300)]/90 backdrop-blur-sm shadow-md text-sm"
-        style:top="4px"
-        style:left="{toolbarLeftPct}%"
-        style:transform="translateX(-50%)"
-      >
-        <!-- Time range display -->
-        <span class="text-[var(--color-base-content)] whitespace-nowrap font-medium">
-          {Math.min(selectionStartSec, selectionEndSec).toFixed(1)}s &ndash; {Math.max(
-            selectionStartSec,
-            selectionEndSec
-          ).toFixed(1)}s
-        </span>
-
-        <!-- Divider -->
-        <div class="w-px h-5 bg-[var(--color-base-content)]/20"></div>
-
-        <!-- Review (jump to start) button -->
-        <button
-          class="p-1.5 rounded-full hover:bg-[var(--color-base-content)]/10 text-[var(--color-base-content)]"
-          onclick={reviewSelection}
-          aria-label={t('components.audioPlayer.clipExtraction.reviewSelection')}
-          title={t('components.audioPlayer.clipExtraction.reviewSelection')}
-        >
-          <SkipBack class="size-4" />
-        </button>
-
-        <!-- Play/Pause selection button -->
-        {#if isPlayingSelection}
-          <button
-            class="p-1.5 rounded-full hover:bg-[var(--color-base-content)]/10 text-[var(--color-base-content)]"
-            onclick={stopSelection}
-            aria-label={t('components.audioPlayer.clipExtraction.pauseSelection')}
-            title={t('components.audioPlayer.clipExtraction.pauseSelection')}
-          >
-            <Pause class="size-4" />
-          </button>
-        {:else}
-          <button
-            class="p-1.5 rounded-full hover:bg-[var(--color-base-content)]/10 text-[var(--color-base-content)]"
-            onclick={playSelection}
-            aria-label={t('components.audioPlayer.clipExtraction.playSelection')}
-            title={t('components.audioPlayer.clipExtraction.playSelection')}
-          >
-            <Play class="size-4" />
-          </button>
-        {/if}
-
-        <!-- Divider -->
-        <div class="w-px h-5 bg-[var(--color-base-content)]/20"></div>
-
-        <!-- Download with format picker -->
-        <div class="relative" bind:this={formatMenuRef}>
-          <button
-            class="p-1.5 rounded-full hover:bg-[var(--color-base-content)]/10 text-[var(--color-base-content)] flex items-center gap-0.5"
-            onclick={toggleFormatMenu}
-            disabled={isExtracting}
-            aria-label={t('components.audioPlayer.clipExtraction.extractClip')}
-            title={t('components.audioPlayer.clipExtraction.extractClip')}
-            aria-expanded={showFormatMenu}
-            aria-haspopup="true"
-          >
-            {#if isExtracting}
-              <div
-                class="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"
-              ></div>
-            {:else}
-              <Download class="size-4" />
-              <ChevronDown class="size-3" />
-            {/if}
-          </button>
-
-          <!-- Format dropdown menu -->
-          {#if showFormatMenu}
-            <div
-              class="absolute top-full left-1/2 -translate-x-1/2 mt-1 py-1 rounded-lg bg-[var(--color-base-100)] border border-[var(--color-base-300)] shadow-lg min-w-[8.5rem] z-30"
-            >
-              {#each CLIP_FORMATS as fmt (fmt.value)}
-                <button
-                  class="w-full px-3.5 py-2 text-left flex items-center justify-between gap-3 hover:bg-[var(--color-base-200)] text-[var(--color-base-content)] transition-colors"
-                  onclick={() => selectFormatAndExtract(fmt.value)}
-                >
-                  <span class="font-medium">{fmt.label}</span>
-                  <span class="text-[var(--color-base-content)]/50 text-xs"
-                    >{fmt.lossless
-                      ? t('components.audioPlayer.clipExtraction.lossless')
-                      : t('components.audioPlayer.clipExtraction.lossy')}</span
-                  >
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-
-        <!-- Clear selection button -->
-        <button
-          class="p-1.5 rounded-full hover:bg-[var(--color-base-content)]/10 text-[var(--color-base-content)]"
-          onclick={clearSelection}
-          aria-label={t('components.audioPlayer.clipExtraction.clearSelection')}
-          title={t('components.audioPlayer.clipExtraction.clearSelection')}
-        >
-          <XCircle class="size-4" />
-        </button>
-
-        <!-- Extraction error -->
-        {#if extractionError}
-          <span class="text-[var(--color-error)] ml-1">{extractionError}</span>
-        {/if}
-      </div>
     {/if}
   {/if}
 
-  <!-- Bottom overlay controls -->
-  <div
-    class="absolute bottom-0 left-0 right-0 bg-black/25 p-1 rounded-b-md transition-opacity duration-300"
-    class:opacity-0={!isMobile}
-    class:group-hover:opacity-100={!isMobile}
-    class:opacity-100={isMobile}
-  >
-    <div class="flex items-center justify-between">
-      <!-- Play/Pause button -->
-      <button
-        bind:this={playPauseButton}
-        id={playPauseId}
-        class="text-white p-1 rounded-full hover:bg-white/20 shrink-0"
-        onclick={handlePlayPause}
-        disabled={isLoading}
-        aria-label={isPlaying ? t('media.audio.pause') : t('media.audio.play')}
-      >
-        {#if isLoading}
-          <div
-            class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"
-          ></div>
-        {:else if isPlaying}
-          <Pause class="size-4" />
-        {:else}
-          <Play class="size-4" />
-        {/if}
-      </button>
-
-      <!-- Progress bar -->
-      <div
-        bind:this={progressBar}
-        id={progressId}
-        class="grow bg-gray-200 rounded-full h-1.5 mx-2 cursor-pointer"
-        role="button"
-        tabindex="0"
-        aria-label={t('media.audio.seekProgress', {
-          current: Math.floor(currentTime),
-          total: Math.floor(duration),
-        })}
-        onclick={handleProgressClick}
-        onkeydown={e => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            const rect = progressBar.getBoundingClientRect();
-            const centerX = rect.left + rect.width / 2;
-            const mockEvent = { clientX: centerX } as MouseEvent;
-            handleProgressClick(mockEvent);
-          }
-        }}
-      >
-        <div
-          class="bg-primary h-1.5 rounded-full transition-all duration-100"
-          style:width="{progress}%"
-        ></div>
-      </div>
-
-      <!-- Current time -->
-      <span class="text-xs font-medium text-white shrink-0">{formatTime(currentTime)}</span>
-
-      <!-- Download button -->
-      {#if showDownload}
-        <a
-          href={audioUrl}
-          download
-          class="text-white p-1 rounded-full hover:bg-white/20 ml-2 shrink-0"
-          aria-label={t('media.audio.download')}
-        >
-          <Download class="size-4" />
-        </a>
-      {/if}
+  <!-- Processing active badge (only shown when toolbar is not used) -->
+  {#if processingActive && !enableClipExtraction}
+    <div class="processing-badge" role="status">
+      {t('components.audioPlayer.processing.processingActive')}
     </div>
-  </div>
+  {/if}
+
+  <!-- Bottom overlay controls (hidden when toolbar is used) -->
+  {#if !enableClipExtraction}
+    <div
+      class="absolute bottom-0 left-0 right-0 bg-black/25 p-1 rounded-b-md transition-opacity duration-300"
+      class:opacity-0={!isMobile}
+      class:group-hover:opacity-100={!isMobile}
+      class:opacity-100={isMobile}
+    >
+      <div class="flex items-center justify-between">
+        <!-- Play/Pause button -->
+        <button
+          bind:this={playPauseButton}
+          id={playPauseId}
+          class="text-white p-1 rounded-full hover:bg-white/20 shrink-0"
+          onclick={handlePlayPause}
+          disabled={isLoading}
+          aria-label={isPlaying ? t('media.audio.pause') : t('media.audio.play')}
+        >
+          {#if isLoading}
+            <div
+              class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"
+            ></div>
+          {:else if isPlaying}
+            <Pause class="size-4" />
+          {:else}
+            <Play class="size-4" />
+          {/if}
+        </button>
+
+        <!-- Progress bar -->
+        <div
+          bind:this={progressBar}
+          id={progressId}
+          class="grow bg-gray-200 rounded-full h-1.5 mx-2 cursor-pointer"
+          role="button"
+          tabindex="0"
+          aria-label={t('media.audio.seekProgress', {
+            current: Math.floor(currentTime),
+            total: Math.floor(duration),
+          })}
+          onclick={handleProgressClick}
+          onkeydown={e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              const rect = progressBar.getBoundingClientRect();
+              const centerX = rect.left + rect.width / 2;
+              const mockEvent = { clientX: centerX } as MouseEvent;
+              handleProgressClick(mockEvent);
+            }
+          }}
+        >
+          <div
+            class="bg-primary h-1.5 rounded-full transition-all duration-100"
+            style:width="{progress}%"
+          ></div>
+        </div>
+
+        <!-- Current time -->
+        <span class="text-xs font-medium text-white shrink-0">{formatTime(currentTime)}</span>
+
+        <!-- Download button -->
+        {#if showDownload}
+          <a
+            href={audioUrl}
+            download
+            class="text-white p-1 rounded-full hover:bg-white/20 ml-2 shrink-0"
+            aria-label={t('media.audio.download')}
+          >
+            <Download class="size-4" />
+          </a>
+        {/if}
+      </div>
+    </div>
+  {/if}
 
   <!-- Error message -->
   {#if error}
@@ -1898,3 +2119,87 @@
     </div>
   {/if}
 </div>
+
+{#if enableClipExtraction}
+  <AudioToolbar
+    {isPlaying}
+    isLoading={isLoading || isProcessing}
+    {currentTime}
+    {duration}
+    {progress}
+    loop={loopEnabled}
+    onPlayPause={handlePlayPause}
+    onSeek={handleProgressClick}
+    onLoopToggle={() => (loopEnabled = !loopEnabled)}
+    selectionStart={selectionStartSec !== null && selectionEndSec !== null
+      ? Math.min(selectionStartSec, selectionEndSec)
+      : null}
+    selectionEnd={selectionStartSec !== null && selectionEndSec !== null
+      ? Math.max(selectionStartSec, selectionEndSec)
+      : null}
+    hasSelection={selectionStartSec !== null && selectionEndSec !== null}
+    gainDb={gainValue}
+    denoise={processingDenoise}
+    normalize={processingNormalize}
+    {isProcessing}
+    {isPlayingSelection}
+    {isExtracting}
+    {extractionError}
+    onPlaySelection={playSelection}
+    onStopSelection={stopSelection}
+    onSkipToSelection={reviewSelection}
+    onClearSelection={clearSelection}
+    onGainChange={updateGain}
+    onDenoiseChange={handleDenoiseChange}
+    onNormalizeToggle={handleNormalizeToggle}
+    onExport={handleToolbarExport}
+  />
+{/if}
+
+<style>
+  .processing-badge {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    background: var(--color-primary);
+    color: var(--color-primary-content, #fff);
+    border-radius: var(--radius-selector);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    z-index: 5;
+    opacity: 0.85;
+  }
+
+  .freq-label {
+    position: absolute;
+    left: 4px;
+    transform: translateY(50%);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: rgb(255 255 255 / 0.75);
+    background: none;
+    text-shadow:
+      0 0 3px rgb(0 0 0 / 1),
+      0 0 6px rgb(0 0 0 / 0.8),
+      1px 1px 2px rgb(0 0 0 / 0.9);
+    line-height: 1;
+    pointer-events: none;
+    z-index: 3;
+  }
+
+  .freq-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: rgb(255 255 255 / 0);
+    pointer-events: none;
+    z-index: 3;
+    transition: background 0.2s ease;
+  }
+
+  :global(.group:hover) .freq-line {
+    background: rgb(255 255 255 / 0.12);
+  }
+</style>

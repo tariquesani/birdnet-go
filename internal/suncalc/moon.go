@@ -8,6 +8,30 @@ import (
 	"github.com/sj14/astral/pkg/astral"
 )
 
+// Moon phase name constants for the 8 standard lunar phases.
+const (
+	PhaseNewMoon        = "New Moon"
+	PhaseWaxingCrescent = "Waxing Crescent"
+	PhaseFirstQuarter   = "First Quarter"
+	PhaseWaxingGibbous  = "Waxing Gibbous"
+	PhaseFullMoon       = "Full Moon"
+	PhaseWaningGibbous  = "Waning Gibbous"
+	PhaseLastQuarter    = "Last Quarter"
+	PhaseWaningCrescent = "Waning Crescent"
+)
+
+// Moon icon name constants matching Basmilius weather-icons.
+const (
+	IconNameNewMoon        = "moon-new"
+	IconNameWaxingCrescent = "moon-waxing-crescent"
+	IconNameFirstQuarter   = "moon-first-quarter"
+	IconNameWaxingGibbous  = "moon-waxing-gibbous"
+	IconNameFullMoon       = "moon-full"
+	IconNameWaningGibbous  = "moon-waning-gibbous"
+	IconNameLastQuarter    = "moon-last-quarter"
+	IconNameWaningCrescent = "moon-waning-crescent"
+)
+
 // MoonData holds computed moon phase information for a given date.
 type MoonData struct {
 	Phase        float64 // 0–27.99 raw phase value from astral library
@@ -16,11 +40,12 @@ type MoonData struct {
 	IconName     string  // Basmilius weather-icons icon name
 }
 
-// phaseInfo maps a phase range to its name and icon.
+// phaseInfo maps a phase range to its name, icon, and emoji.
 type phaseInfo struct {
 	maxPhase  float64
 	phaseName string
 	iconName  string
+	emoji     string
 }
 
 // phases defines the 8 standard lunar phases with their upper bounds.
@@ -35,28 +60,26 @@ type phaseInfo struct {
 // Full moon occurs near 14. The 8 sub-phases are evenly spaced at 3.5-day intervals,
 // but New Moon straddles the cycle boundary: [26.25, 28) ∪ [0, 1.75).
 var phases = []phaseInfo{
-	{1.75, "New Moon", "moon-new"},
-	{5.25, "Waxing Crescent", "moon-waxing-crescent"},
-	{8.75, "First Quarter", "moon-first-quarter"},
-	{12.25, "Waxing Gibbous", "moon-waxing-gibbous"},
-	{15.75, "Full Moon", "moon-full"},
-	{19.25, "Waning Gibbous", "moon-waning-gibbous"},
-	{22.75, "Last Quarter", "moon-last-quarter"},
-	{26.25, "Waning Crescent", "moon-waning-crescent"},
+	{1.75, PhaseNewMoon, IconNameNewMoon, "🌑"},
+	{5.25, PhaseWaxingCrescent, IconNameWaxingCrescent, "🌒"},
+	{8.75, PhaseFirstQuarter, IconNameFirstQuarter, "🌓"},
+	{12.25, PhaseWaxingGibbous, IconNameWaxingGibbous, "🌔"},
+	{15.75, PhaseFullMoon, IconNameFullMoon, "🌕"},
+	{19.25, PhaseWaningGibbous, IconNameWaningGibbous, "🌖"},
+	{22.75, PhaseLastQuarter, IconNameLastQuarter, "🌗"},
+	{26.25, PhaseWaningCrescent, IconNameWaningCrescent, "🌘"},
 	// Values >= 26.25 wrap back to New Moon (cycle boundary)
 }
 
 // moonPhaseEmojis maps phase names to their emoji representation.
-var moonPhaseEmojis = map[string]string{
-	"New Moon":        "🌑",
-	"Waxing Crescent": "🌒",
-	"First Quarter":   "🌓",
-	"Waxing Gibbous":  "🌔",
-	"Full Moon":       "🌕",
-	"Waning Gibbous":  "🌖",
-	"Last Quarter":    "🌗",
-	"Waning Crescent": "🌘",
-}
+// Built from the phases slice to maintain a single source of truth.
+var moonPhaseEmojis = func() map[string]string {
+	m := make(map[string]string, len(phases))
+	for _, p := range phases {
+		m[p.phaseName] = p.emoji
+	}
+	return m
+}()
 
 // GetMoonPhase calculates the moon phase for the given date.
 // The calculation is location-independent — only the date matters.
