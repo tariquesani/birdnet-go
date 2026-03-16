@@ -131,7 +131,8 @@
       "calendarNavigation": "Použite šípky na navigáciu v kalendári, Enter na výber, Escape na zavretie",
       "downloadCsv": "Stiahnuť zoznam druhov ako CSV",
       "visitEbirdLink": "Otvoriť eBird.org v novej karte",
-      "learnEbirdTaxonomyLink": "Otvoriť taxonómiu eBird v novej karte"
+      "learnEbirdTaxonomyLink": "Otvoriť taxonómiu eBird v novej karte",
+      "resizeHandle": "Potiahnutím zmeníte veľkosť"
     },
     "labels": {
       "confidence": "Istota",

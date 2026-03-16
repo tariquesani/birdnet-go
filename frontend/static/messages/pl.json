@@ -131,7 +131,8 @@
       "calendarNavigation": "Użyj klawiszy strzałek do nawigacji po kalendarzu, Enter aby wybrać, Escape aby zamknąć",
       "downloadCsv": "Pobierz listę gatunków jako CSV",
       "visitEbirdLink": "Otwórz eBird.org w nowej karcie",
-      "learnEbirdTaxonomyLink": "Otwórz Taksonomię eBird w nowej karcie"
+      "learnEbirdTaxonomyLink": "Otwórz Taksonomię eBird w nowej karcie",
+      "resizeHandle": "Przeciągnij, aby zmienić rozmiar"
     },
     "labels": {
       "confidence": "Pewność",
