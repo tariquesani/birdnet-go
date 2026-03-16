@@ -55,6 +55,20 @@ func createTestScript(t *testing.T, name, content string) string {
 	return scriptPath
 }
 
+// readFileEventually polls until the file at path is readable and non-empty,
+// returning its contents. This handles filesystem flush delays on slow CI runners
+// where a child process's file writes may not be immediately visible after exit.
+func readFileEventually(t *testing.T, path string) []byte {
+	t.Helper()
+	var output []byte
+	require.Eventually(t, func() bool {
+		var err error
+		output, err = os.ReadFile(path) //nolint:gosec // test file path is controlled
+		return err == nil && len(output) > 0
+	}, 5*time.Second, 50*time.Millisecond, "output file should become readable")
+	return output
+}
+
 // createTestDetections creates a Detections struct with both Result and Note populated.
 func createTestDetections(commonName string) Detections {
 	return Detections{
@@ -892,16 +906,7 @@ func TestExecuteCommandAction_WithParameters(t *testing.T) {
 	err := action.Execute(t.Context(), det)
 	require.NoError(t, err)
 
-	// Wait for output file to become readable. On resource-constrained CI runners
-	// with slow filesystems, the file may not be immediately visible after the
-	// child process exits and CombinedOutput returns.
-	var output []byte
-	require.Eventually(t, func() bool {
-		var readErr error
-		output, readErr = os.ReadFile(outputPath) //nolint:gosec // test file path is controlled
-		return readErr == nil && len(output) > 0
-	}, 5*time.Second, 50*time.Millisecond, "output file should become readable")
-
+	output := readFileEventually(t, outputPath)
 	outputStr := string(output)
 
 	// Should contain both parameters (sorted alphabetically)
@@ -1007,14 +1012,7 @@ func TestExecuteCommandAction_UnicodeInParameters(t *testing.T) {
 	err := action.Execute(t.Context(), det)
 	require.NoError(t, err)
 
-	// Wait for output file to become readable on slow CI filesystems
-	var output []byte
-	require.Eventually(t, func() bool {
-		var readErr error
-		output, readErr = os.ReadFile(outputPath) //nolint:gosec // test file path is controlled
-		return readErr == nil && len(output) > 0
-	}, 5*time.Second, 50*time.Millisecond, "output file should become readable")
-
+	output := readFileEventually(t, outputPath)
 	assert.Contains(t, string(output), "Sparrow")
 	// The shell may handle emoji differently, just verify the script ran
 }
@@ -1049,12 +1047,11 @@ func TestExecuteCommandAction_EnvironmentIsolation(t *testing.T) {
 	if runtime.GOOS == osWindows {
 		t.Skip("Test is Unix-specific")
 	}
-	t.Parallel()
+	// This test mutates process-wide environment variables; must run serially.
 
-	// Set a test environment variable
+	// Set a test environment variable (t.Setenv auto-restores on cleanup)
 	testEnvKey := "BIRDNET_TEST_SECRET_" + time.Now().Format("20060102150405")
-	require.NoError(t, os.Setenv(testEnvKey, "secret_value"))
-	t.Cleanup(func() { _ = os.Unsetenv(testEnvKey) })
+	t.Setenv(testEnvKey, "secret_value")
 
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "env_output.txt")
@@ -1070,13 +1067,7 @@ func TestExecuteCommandAction_EnvironmentIsolation(t *testing.T) {
 	err := action.Execute(t.Context(), createTestDetections("Test Bird"))
 	require.NoError(t, err)
 
-	// Wait for output file to become readable on slow CI filesystems
-	var output []byte
-	require.Eventually(t, func() bool {
-		var readErr error
-		output, readErr = os.ReadFile(outputPath) //nolint:gosec // test file path is controlled
-		return readErr == nil && len(output) > 0
-	}, 5*time.Second, 50*time.Millisecond, "output file should become readable")
+	output := readFileEventually(t, outputPath)
 
 	// Verify output does NOT contain our secret environment variable
 	assert.NotContains(t, string(output), testEnvKey)

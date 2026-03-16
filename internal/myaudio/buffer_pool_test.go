@@ -152,12 +152,14 @@ func TestBufferPoolGetPut(t *testing.T) {
 }
 
 func TestBufferPoolSizeValidation(t *testing.T) {
-	t.Parallel()
-
-	// Force a GC cycle before starting to prevent the runtime from triggering
-	// one mid-test, which can clear sync.Pool internals and cause stats to
-	// diverge from expectations on resource-constrained CI runners.
+	// Force a GC cycle before entering parallel execution to prevent the
+	// runtime from triggering one mid-test, which can clear sync.Pool
+	// internals and cause stats to diverge from expectations on
+	// resource-constrained CI runners. Must run before t.Parallel() so
+	// the process-wide GC doesn't interfere with other concurrent tests.
 	runtime.GC()
+
+	t.Parallel()
 
 	const bufferSize = 1024
 	pool, err := NewBufferPool(bufferSize)

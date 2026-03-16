@@ -40,11 +40,14 @@ func createDatabase(t *testing.T, settings *conf.Settings) Interface {
 			sqliteStore.StopMonitoring()
 		}
 
-		// Yield the processor to let background goroutines react to context
-		// cancellation. This prevents "database is closed" races on CI runners
-		// where goroutine scheduling may be delayed.
+		// Allow background goroutines time to observe context cancellation
+		// and exit. This prevents "database is closed" races on CI runners
+		// where goroutine scheduling may be delayed under load.
+		// Note: ideally StopMonitoring would block until goroutines exit
+		// (via sync.WaitGroup), but that requires a production code change
+		// tracked separately.
 		runtime.Gosched()
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 
 		assert.NoError(t, dataStore.Close(), "Failed to close datastore")
 	})
