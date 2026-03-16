@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1446,5 +1447,49 @@ func TestServeAudioClipNoTempFileReturns404(t *testing.T) {
 	} else {
 		assert.Equal(t, http.StatusNotFound, rec.Code,
 			"Should return 404 when no temp file exists")
+	}
+}
+
+// TestServeAudioClipGraceWaitServesFile verifies that when an audio file
+// appears shortly after the initial request (no temp file visible), the
+// grace period wait catches it instead of returning 404. This covers the
+// race condition from issue #2355 where the detection DB record is committed
+// but FFmpeg hasn't created the temp file yet.
+func TestServeAudioClipGraceWaitServesFile(t *testing.T) {
+	e, controller, tempDir := setupMediaTestEnvironment(t)
+
+	audioFilename := "grace-wait-test.wav"
+	audioFilePath := filepath.Join(tempDir, audioFilename)
+
+	// No temp file — only the final file appears after a short delay.
+	// This simulates the race window where FFmpeg hasn't started yet.
+	// Delay is derived from audioGracePeriod to stay aligned with production timing.
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		time.Sleep(audioGracePeriod / 2)
+		if err := createTestAudioFile(t, audioFilePath); err != nil {
+			t.Errorf("Background goroutine failed: %v", err)
+		}
+	})
+	t.Cleanup(wg.Wait)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/media/audio/"+audioFilename, http.NoBody)
+	rec := httptest.NewRecorder()
+	ctx := e.NewContext(req, rec)
+	ctx.SetPath("/api/v2/media/audio/:filename")
+	ctx.SetParamNames("filename")
+	ctx.SetParamValues(audioFilename)
+
+	handlerErr := controller.ServeAudioClip(ctx)
+
+	// Should succeed — grace wait should pick up the file
+	if handlerErr != nil {
+		if httpErr, ok := errors.AsType[*echo.HTTPError](handlerErr); ok {
+			assert.NotEqual(t, http.StatusNotFound, httpErr.Code,
+				"Should not return 404 when file appears within grace period")
+		}
+	} else {
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"Should serve the file successfully after grace wait")
 	}
 }
