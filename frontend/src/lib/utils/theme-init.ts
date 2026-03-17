@@ -59,7 +59,7 @@ export function initializeTheme(): void {
 
   if (stored === 'dark' || stored === 'light') {
     theme = stored;
-  } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+  } else if (window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
     theme = 'dark';
   }
 
