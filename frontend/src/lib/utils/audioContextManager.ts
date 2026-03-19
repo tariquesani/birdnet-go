@@ -57,9 +57,23 @@ export async function getAudioContext(): Promise<AudioContext> {
     sharedContext = new AudioContextClass();
   }
 
-  // Resume if suspended (required for autoplay policies)
+  // Resume if suspended (required for autoplay policies).
+  // Add a timeout because resume() may block indefinitely without a user gesture
+  // (browser autoplay policy). In that case, return the suspended context — the
+  // caller can still set up the audio graph, and it will start producing data
+  // once the user interacts with the page.
   if (sharedContext.state === 'suspended') {
-    await sharedContext.resume();
+    try {
+      await Promise.race([
+        sharedContext.resume(),
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error('AudioContext resume timeout')), 2000)
+        ),
+      ]);
+    } catch {
+      // resume() timed out — context stays suspended until user gesture.
+      // This is expected on page reload with auto-start.
+    }
   }
 
   return sharedContext;

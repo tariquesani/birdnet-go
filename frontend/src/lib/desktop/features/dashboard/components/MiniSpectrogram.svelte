@@ -419,7 +419,7 @@
       </div>
     </div>
 
-    {#if (isActive || isConnecting) && spectro.isActive}
+    {#if isActive || isConnecting}
       <SpectrogramCanvas
         analyser={spectro.analyser}
         frequencyData={spectro.frequencyData}
@@ -430,12 +430,6 @@
         isActive={spectro.isActive}
         className="h-28 w-full"
       />
-    {:else if isActive || isConnecting}
-      <div class="flex h-28 items-center justify-center bg-black">
-        <div
-          class="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-primary)] border-t-transparent"
-        ></div>
-      </div>
     {/if}
   </div>
 {/if}
