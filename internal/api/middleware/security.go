@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net"
 	"net/http"
 	"strings"
 
@@ -133,13 +134,26 @@ func NewSecureHeaders(config *SecurityConfig) echo.MiddlewareFunc {
 		// Wrap next once at setup time, not per-request.
 		wrapped := echoSecure(next)
 		return func(c echo.Context) error {
-			// Set headers not supported by Echo's SecureConfig.
-			// COOP isolates the browsing context, preventing tabnabbing and cross-window attacks.
-			// Note: "same-origin" is safe here because OAuth uses redirects, not popups.
-			c.Response().Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+			// Set COOP only on secure contexts (HTTPS or localhost).
+			// Browsers ignore COOP on non-trustworthy origins per
+			// https://www.w3.org/TR/powerful-features/#potentially-trustworthy-origin
+			if IsSecureRequest(c.Request()) || isLocalhost(c.Request()) {
+				c.Response().Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+			}
 			return wrapped(c)
 		}
 	}
+}
+
+// isLocalhost returns true if the request's Host is a localhost address,
+// which browsers consider a trustworthy origin even over plain HTTP.
+func isLocalhost(r *http.Request) bool {
+	host := r.Host
+	// Strip port if present.
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 // NewBodyLimit creates a middleware that limits the request body size.

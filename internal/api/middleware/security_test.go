@@ -56,15 +56,75 @@ func TestNewSecureHeaders_CrossOriginOpenerPolicy(t *testing.T) {
 	t.Parallel()
 
 	mw := NewSecureHeaders(DefaultSecurityConfig())
-	c, rec := newTestContext(t, http.MethodGet, "/")
 
-	handler := mw(func(c echo.Context) error {
-		return c.String(http.StatusOK, "ok")
+	t.Run("set on HTTPS request", func(t *testing.T) {
+		t.Parallel()
+		c, rec := newTestContext(t, http.MethodGet, "/")
+		c.Request().Header.Set("X-Forwarded-Proto", "https")
+
+		handler := mw(func(c echo.Context) error {
+			return c.String(http.StatusOK, "ok")
+		})
+
+		err := handler(c)
+		require.NoError(t, err)
+		assert.Equal(t, "same-origin", rec.Header().Get("Cross-Origin-Opener-Policy"))
 	})
 
-	err := handler(c)
-	require.NoError(t, err)
-	assert.Equal(t, "same-origin", rec.Header().Get("Cross-Origin-Opener-Policy"))
+	t.Run("set on localhost request", func(t *testing.T) {
+		t.Parallel()
+		c, rec := newTestContext(t, http.MethodGet, "/")
+		c.Request().Host = "localhost:8080"
+
+		handler := mw(func(c echo.Context) error {
+			return c.String(http.StatusOK, "ok")
+		})
+
+		err := handler(c)
+		require.NoError(t, err)
+		assert.Equal(t, "same-origin", rec.Header().Get("Cross-Origin-Opener-Policy"))
+	})
+
+	t.Run("omitted on plain HTTP non-localhost", func(t *testing.T) {
+		t.Parallel()
+		c, rec := newTestContext(t, http.MethodGet, "/")
+		c.Request().Host = "192.168.1.100:8080"
+
+		handler := mw(func(c echo.Context) error {
+			return c.String(http.StatusOK, "ok")
+		})
+
+		err := handler(c)
+		require.NoError(t, err)
+		assert.Empty(t, rec.Header().Get("Cross-Origin-Opener-Policy"))
+	})
+}
+
+func TestIsLocalhost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		host     string
+		expected bool
+	}{
+		{"localhost no port", "localhost", true},
+		{"localhost with port", "localhost:8080", true},
+		{"127.0.0.1 no port", "127.0.0.1", true},
+		{"127.0.0.1 with port", "127.0.0.1:8080", true},
+		{"IPv6 loopback", "::1", true},
+		{"IPv6 loopback with port", "[::1]:8080", true},
+		{"LAN IP", "192.168.1.100:8080", false},
+		{"hostname", "birdnet.local:8080", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := &http.Request{Host: tt.host}
+			assert.Equal(t, tt.expected, isLocalhost(r))
+		})
+	}
 }
 
 func TestNewSecureHeaders_FrameAncestors(t *testing.T) {
