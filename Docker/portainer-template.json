@@ -22,13 +22,13 @@
         {
           "name": "BIRDNET_UID",
           "label": "User ID",
-          "description": "User ID for file ownership. Run 'id -u' on host to find yours.",
+          "description": "Linux user ID that owns config, audio clips, and database files. Must match host user for correct file permissions. Run 'id -u' on host to find yours.",
           "default": "1000"
         },
         {
           "name": "BIRDNET_GID",
           "label": "Group ID",
-          "description": "Group ID for file ownership. Run 'id -g' on host to find yours.",
+          "description": "Linux group ID that owns config, audio clips, and database files. Must match host user for correct file permissions. Run 'id -g' on host to find yours.",
           "default": "1000"
         },
         {
@@ -85,13 +85,13 @@
         {
           "name": "BIRDNET_UID",
           "label": "User ID",
-          "description": "User ID for file ownership. Run 'id -u' on host to find yours.",
+          "description": "Linux user ID that owns config, audio clips, and database files. Must match host user for correct file permissions. Run 'id -u' on host to find yours.",
           "default": "1000"
         },
         {
           "name": "BIRDNET_GID",
           "label": "Group ID",
-          "description": "Group ID for file ownership. Run 'id -g' on host to find yours.",
+          "description": "Linux group ID that owns config, audio clips, and database files. Must match host user for correct file permissions. Run 'id -g' on host to find yours.",
           "default": "1000"
         },
         {
