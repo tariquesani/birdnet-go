@@ -89,10 +89,12 @@ type Processor struct {
 	sseBroadcasterMutex sync.RWMutex                                                         // Mutex to protect SSE broadcaster access
 
 	// Pending detection broadcast fields
-	PendingBroadcaster   func(snapshot []SSEPendingDetection) // Function to broadcast pending detections via SSE
-	pendingBroadcasterMu sync.RWMutex                         // Mutex to protect PendingBroadcaster access
-	pendingFlushNotifs   []SSEPendingDetection                // Terminal-state notifications from last flush cycle
-	pendingFlushNotifsMu sync.Mutex                           // Mutex to protect pendingFlushNotifs
+	PendingBroadcaster      func(snapshot []SSEPendingDetection) // Function to broadcast pending detections via SSE
+	pendingBroadcasterMu    sync.RWMutex                         // Mutex to protect PendingBroadcaster access
+	pendingFlushNotifs      []SSEPendingDetection                // Terminal-state notifications from last flush cycle
+	pendingFlushNotifsMu    sync.Mutex                           // Mutex to protect pendingFlushNotifs
+	lastBroadcastSnapshot   []SSEPendingDetection                // Last broadcast snapshot for change detection
+	lastBroadcastSnapshotMu sync.Mutex                           // Mutex to protect lastBroadcastSnapshot
 
 	// Backup system fields (optional)
 	backupManager   any // Use interface{} to avoid import cycle
@@ -1333,11 +1335,15 @@ func (p *Processor) flushPendingDetections(minDetections int) (pendingCount, flu
 					Status:         PendingStatusActive,
 					FirstDetected:  item.CreatedAt.Unix(),
 					Source:         p.getDisplayNameForSource(item.Source),
+					SourceID:       item.Source,
+					HitCount:       item.Count,
 				})
 			}
 		}
 		logPendingBroadcast(len(broadcastSnapshot), len(terminalNotifs))
 		broadcastSnapshot = append(broadcastSnapshot, terminalNotifs...)
+		// Sort for stable comparison in broadcastPendingSnapshot.
+		sortPendingSnapshot(broadcastSnapshot)
 	}
 
 	p.pendingMutex.Unlock()
