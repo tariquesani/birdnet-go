@@ -22,6 +22,8 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tphakala/birdnet-go/internal/restart"
+	"github.com/tphakala/birdnet-go/internal/sysinfo"
 )
 
 // runControlEndpointTest runs a control endpoint test with the given parameters
@@ -199,11 +201,15 @@ func TestGetAvailableActions(t *testing.T) {
 		err := json.Unmarshal(rec.Body.Bytes(), &actions)
 		require.NoError(t, err)
 
-		// Check response content
-		require.Len(t, actions, 3, "Should have 3 control actions")
+		// Expected action count depends on container environment
+		expectedCount := 4 // base actions + restart_server
+		if sysinfo.IsContainer() {
+			expectedCount = 5 // + restart_container
+		}
+		require.Len(t, actions, expectedCount, "Should have expected control actions")
 
 		// Verify actions include all expected types
-		var hasRestartAction, hasReloadAction, hasRebuildFilterAction bool
+		var hasRestartAction, hasReloadAction, hasRebuildFilterAction, hasRestartServerAction, hasRestartContainerAction bool
 		for _, action := range actions {
 			switch action.Action {
 			case ActionRestartAnalysis:
@@ -215,6 +221,12 @@ func TestGetAvailableActions(t *testing.T) {
 			case ActionRebuildFilter:
 				hasRebuildFilterAction = true
 				assert.Contains(t, action.Description, "Rebuild")
+			case ActionRestartServer:
+				hasRestartServerAction = true
+				assert.Contains(t, action.Description, "Restart")
+			case ActionRestartContainer:
+				hasRestartContainerAction = true
+				assert.Contains(t, action.Description, "Restart")
 			}
 		}
 
@@ -222,6 +234,10 @@ func TestGetAvailableActions(t *testing.T) {
 		assert.True(t, hasRestartAction, "Missing restart_analysis action")
 		assert.True(t, hasReloadAction, "Missing reload_model action")
 		assert.True(t, hasRebuildFilterAction, "Missing rebuild_filter action")
+		assert.True(t, hasRestartServerAction, "Missing restart_server action")
+		if sysinfo.IsContainer() {
+			assert.True(t, hasRestartContainerAction, "Missing restart_container action")
+		}
 	}
 }
 
@@ -327,6 +343,8 @@ func TestInitControlRoutesRegistration(t *testing.T) {
 		"POST /api/v2/control/restart",
 		"POST /api/v2/control/reload",
 		"POST /api/v2/control/rebuild-filter",
+		"POST /api/v2/control/restart-server",
+		"POST /api/v2/control/restart-container",
 	})
 }
 
@@ -569,4 +587,164 @@ func TestInvalidPayloads(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		assert.Fail(t, "Control signal was not sent")
 	}
+}
+
+// mockShutdownRequester is a test double for ShutdownRequester.
+type mockShutdownRequester struct {
+	called bool
+}
+
+// RequestShutdown records that shutdown was requested.
+func (m *mockShutdownRequester) RequestShutdown() {
+	m.called = true
+}
+
+// TestRestartServer tests the RestartServer endpoint with a valid shutdown requester.
+func TestRestartServer(t *testing.T) {
+	t.Cleanup(restart.Reset)
+	e, _, controller := setupTestEnvironment(t)
+
+	mock := &mockShutdownRequester{}
+	controller.SetShutdownRequester(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/restart-server", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/api/v2/control/restart-server")
+
+	require.NoError(t, controller.RestartServer(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var result ControlResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+	assert.True(t, result.Success)
+	assert.Equal(t, ActionRestartServer, result.Action)
+}
+
+// TestRestartServerAlreadyInProgress tests that a second restart request returns 409 Conflict.
+func TestRestartServerAlreadyInProgress(t *testing.T) {
+	t.Cleanup(restart.Reset)
+	e, _, controller := setupTestEnvironment(t)
+	mock := &mockShutdownRequester{}
+	controller.SetShutdownRequester(mock)
+
+	// First call succeeds
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/restart-server", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, controller.RestartServer(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Second call returns 409
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v2/control/restart-server", http.NoBody)
+	rec2 := httptest.NewRecorder()
+	c2 := e.NewContext(req2, rec2)
+	require.NoError(t, controller.RestartServer(c2))
+	assert.Equal(t, http.StatusConflict, rec2.Code)
+}
+
+// TestRestartServerNoShutdownRequester tests that RestartServer returns 500 when no shutdown requester is set.
+func TestRestartServerNoShutdownRequester(t *testing.T) {
+	t.Cleanup(restart.Reset)
+	e, _, controller := setupTestEnvironment(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/restart-server", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, controller.RestartServer(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// TestRestartContainerNotInContainer tests that RestartContainer returns 400
+// when the detected environment is not a container.
+func TestRestartContainerNotInContainer(t *testing.T) {
+	t.Cleanup(restart.Reset)
+
+	envType, _ := sysinfo.GetEnvironment()
+	if sysinfo.IsContainer() {
+		t.Skipf("Skipping: detected container environment %q", envType)
+	}
+
+	e, _, controller := setupTestEnvironment(t)
+	mock := &mockShutdownRequester{}
+	controller.SetShutdownRequester(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/restart-container", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, controller.RestartContainer(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestRestartContainerInContainer tests that RestartContainer returns 200
+// when the detected environment is a container.
+func TestRestartContainerInContainer(t *testing.T) {
+	t.Cleanup(restart.Reset)
+
+	envType, _ := sysinfo.GetEnvironment()
+	if !sysinfo.IsContainer() {
+		t.Skipf("Skipping: detected non-container environment %q", envType)
+	}
+
+	e, _, controller := setupTestEnvironment(t)
+	mock := &mockShutdownRequester{}
+	controller.SetShutdownRequester(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/restart-container", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, controller.RestartContainer(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var result ControlResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
+	assert.True(t, result.Success)
+	assert.Equal(t, ActionRestartContainer, result.Action)
+}
+
+// TestRestartContainerNoShutdownRequester tests that RestartContainer returns 500
+// when no shutdown requester is set (and we are in a container).
+func TestRestartContainerNoShutdownRequester(t *testing.T) {
+	t.Cleanup(restart.Reset)
+
+	envType, _ := sysinfo.GetEnvironment()
+	if !sysinfo.IsContainer() {
+		t.Skipf("Skipping: detected non-container environment %q", envType)
+	}
+
+	e, _, controller := setupTestEnvironment(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/restart-container", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, controller.RestartContainer(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// TestRestartContainerAlreadyInProgress tests that a second container restart request returns 409.
+func TestRestartContainerAlreadyInProgress(t *testing.T) {
+	t.Cleanup(restart.Reset)
+
+	envType, _ := sysinfo.GetEnvironment()
+	if !sysinfo.IsContainer() {
+		t.Skipf("Skipping: detected non-container environment %q", envType)
+	}
+
+	e, _, controller := setupTestEnvironment(t)
+	mock := &mockShutdownRequester{}
+	controller.SetShutdownRequester(mock)
+
+	// First call succeeds
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/control/restart-container", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	require.NoError(t, controller.RestartContainer(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Second call returns 409
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v2/control/restart-container", http.NoBody)
+	rec2 := httptest.NewRecorder()
+	c2 := e.NewContext(req2, rec2)
+	require.NoError(t, controller.RestartContainer(c2))
+	assert.Equal(t, http.StatusConflict, rec2.Code)
 }

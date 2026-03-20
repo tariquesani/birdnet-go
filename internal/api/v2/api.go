@@ -52,7 +52,9 @@ type Controller struct {
 	EBirdClient         *ebird.Client
 	TaxonomyDB          *birdnet.TaxonomyDatabase
 	controlChan         chan string
-	speciesExcludeMutex sync.RWMutex // Mutex for species exclude list operations
+	shutdownRequester   ShutdownRequester // programmatic shutdown trigger (e.g., for restart)
+	shutdownMu          sync.RWMutex      // protects shutdownRequester
+	speciesExcludeMutex sync.RWMutex      // Mutex for species exclude list operations
 	// DisableSaveSettings prevents persisting settings changes to disk.
 	// When set to true, all settings modifications remain in memory only.
 	// This is primarily used in testing but can be used in production for read-only mode.
@@ -116,6 +118,11 @@ type Controller struct {
 	// This is primarily used in testing to ensure proper setup before assertions.
 	// Only created when routes are initialized (production mode or specific tests).
 	goroutinesStarted chan struct{} // signals when all background goroutines have started (nil if routes not initialized)
+}
+
+// ShutdownRequester allows triggering a programmatic shutdown.
+type ShutdownRequester interface {
+	RequestShutdown()
 }
 
 // Option is a functional option for configuring the Controller.
@@ -678,6 +685,22 @@ func (c *Controller) Shutdown() {
 	}
 
 	c.Debug("API Controller shutdown complete")
+}
+
+// SetShutdownRequester sets the shutdown requester for programmatic restart.
+// SetShutdownRequester sets the shutdown requester for programmatic restart.
+// Thread-safe: may be called after the HTTP server starts accepting requests.
+func (c *Controller) SetShutdownRequester(sr ShutdownRequester) {
+	c.shutdownMu.Lock()
+	defer c.shutdownMu.Unlock()
+	c.shutdownRequester = sr
+}
+
+// getShutdownRequester returns the current shutdown requester, or nil.
+func (c *Controller) getShutdownRequester() ShutdownRequester {
+	c.shutdownMu.RLock()
+	defer c.shutdownMu.RUnlock()
+	return c.shutdownRequester
 }
 
 // Error response structure
