@@ -626,56 +626,87 @@ func realtimeAnalysisInternal(settings *conf.Settings, quitChan chan struct{}) e
 					}
 				}
 
-				// Close controlChan to signal goroutines selecting on it to stop
-				log.Info("closing control channel after producers shutdown",
+				// Step 6: Close controlChan to signal goroutines selecting on it to stop
+				log.Info("shutdown step 6: closing control channel after producers shutdown",
+					logger.Int("step", 6),
 					logger.String("operation", "close_control_channel"))
 				close(controlChan)
 
-				// Check context after step 5 — if the timeout fired while the
-				// HTTP server was shutting down, return immediately and let the
-				// deferred cleanup handle database close.
-				if ctx.Err() != nil {
-					log.Warn("shutdown context cancelled after step 5",
-						logger.Int("step", 5),
-						logger.Error(ctx.Err()),
-						logger.String("operation", "shutdown_timeout"))
-					return
-				}
+				// Step 7: Shutdown FFmpegManager — cancels manager context (stops monitoring/watchdog),
+				// stops any remaining streams. RTSP goroutines may have already stopped
+				// their streams via quitChan; StopStream is safe to call twice.
+				log.Info("shutdown step 7: shutting down FFmpeg manager",
+					logger.Int("step", 7),
+					logger.String("operation", "shutdown_ffmpeg_manager"))
+				myaudio.ShutdownFFmpegManagerWithContext(ctx)
 
-				// Step 6: Wait for all goroutines
-				log.Info("shutdown step 6: waiting for goroutines to finish",
-					logger.Int("step", 6),
+				// Step 8: Wait for all goroutines (with context deadline).
+				// No early return between steps 7-9 — steps 8 and 9 handle
+				// expired contexts internally, and step 9 must always run so
+				// the processor's cancel functions fire (workerCancel, flusherCancel).
+				log.Info("shutdown step 8: waiting for goroutines to finish",
+					logger.Int("step", 8),
 					logger.String("operation", "shutdown_wait_goroutines"))
-				wg.Wait()
+
+				wgDone := make(chan struct{})
+				go func() {
+					wg.Wait()
+					close(wgDone)
+				}()
+
+				select {
+				case <-wgDone:
+					log.Info("all goroutines finished",
+						logger.Int("step", 8),
+						logger.String("operation", "shutdown_goroutines_done"))
+				case <-ctx.Done():
+					log.Warn("timed out waiting for goroutines",
+						logger.Int("step", 8),
+						logger.String("operation", "shutdown_goroutines_timeout"))
+				}
+
+				// Step 9: Shutdown processor (MQTT, job queue, thresholds).
+				// Always called even if context is expired — ShutdownWithContext
+				// fires cancel functions unconditionally and handles expired
+				// contexts gracefully (skips non-critical cleanup).
+				log.Info("shutdown step 9: shutting down processor",
+					logger.Int("step", 9),
+					logger.String("operation", "shutdown_processor"))
+				if err := proc.ShutdownWithContext(ctx); err != nil {
+					log.Warn("processor shutdown error",
+						logger.Error(err),
+						logger.Int("step", 9),
+						logger.String("operation", "shutdown_processor"))
+				}
 
 				if ctx.Err() != nil {
-					log.Warn("shutdown context cancelled after step 6",
-						logger.Int("step", 6),
+					log.Warn("shutdown context cancelled after step 9",
+						logger.Int("step", 9),
 						logger.Error(ctx.Err()),
 						logger.String("operation", "shutdown_timeout"))
 					return
 				}
 
-				// Step 7: Stop system monitor
+				// Step 10: Stop system monitor
 				if systemMonitorRef != nil {
-					log.Info("shutdown step 7: stopping system monitor",
-						logger.Int("step", 7),
+					log.Info("shutdown step 10: stopping system monitor",
+						logger.Int("step", 10),
 						logger.String("operation", "shutdown_system_monitor"))
 					systemMonitorRef.Stop()
 				}
 
 				if ctx.Err() != nil {
-					log.Warn("shutdown context cancelled after step 7",
-						logger.Int("step", 7),
+					log.Warn("shutdown context cancelled after step 10",
+						logger.Int("step", 10),
 						logger.Error(ctx.Err()),
 						logger.String("operation", "shutdown_timeout"))
 					return
 				}
 
-				// Step 8: Stop notification service
+				// Step 11: Stop notification service
 				if notification.IsInitialized() {
-					log.Info("shutdown step 8: stopping notification service",
-						logger.Int("step", 8),
+					log.Info("shutdown step 11: stopping notification service",
+						logger.Int("step", 11),
 						logger.String("operation", "shutdown_notification_service"))
 					if service := notification.GetService(); service != nil {
 						service.Stop()
@@ -683,31 +714,31 @@ func realtimeAnalysisInternal(settings *conf.Settings, quitChan chan struct{}) e
 				}
 
 				if ctx.Err() != nil {
-					log.Warn("shutdown context cancelled after step 8",
-						logger.Int("step", 8),
+					log.Warn("shutdown context cancelled after step 11",
+						logger.Int("step", 11),
 						logger.Error(ctx.Err()),
 						logger.String("operation", "shutdown_timeout"))
 					return
 				}
 
-				// Step 9: Delete BirdNET interpreter
-				log.Info("shutdown step 9: cleaning up BirdNET interpreter",
-					logger.Int("step", 9),
+				// Step 12: Delete BirdNET interpreter
+				log.Info("shutdown step 12: cleaning up BirdNET interpreter",
+					logger.Int("step", 12),
 					logger.String("operation", "shutdown_birdnet_cleanup"))
 				bn.Delete()
 
-				// Step 10: Stop migration worker (before closing databases)
-				log.Info("shutdown step 10: stopping migration worker",
-					logger.Int("step", 10),
+				// Step 13: Stop migration worker (before closing databases)
+				log.Info("shutdown step 13: stopping migration worker",
+					logger.Int("step", 13),
 					logger.String("operation", "shutdown_migration_worker"))
 				apiv2.StopMigrationWorker()
 
-				// Step 11: Close v2 database (before legacy database closes via deferred closeDataStore).
+				// Step 14: Close v2 database (before legacy database closes via deferred closeDataStore).
 				// In v2-only mode, the v2only.Datastore wraps the same manager — closing is
 				// handled by the deferred closeDataStore call to avoid double-close errors.
 				if !v2OnlyMode {
-					log.Info("shutdown step 11: closing v2 database",
-						logger.Int("step", 11),
+					log.Info("shutdown step 14: closing v2 database",
+						logger.Int("step", 14),
 						logger.String("operation", "shutdown_v2_database"))
 					closeV2Database()
 				}
@@ -730,11 +761,17 @@ func realtimeAnalysisInternal(settings *conf.Settings, quitChan chan struct{}) e
 				// Ensure migration worker is stopped on timeout
 				apiv2.StopMigrationWorker()
 				cancel()
-				// Wait for the shutdown goroutine to finish before returning.
-				// The goroutine checks ctx.Err() between steps and will exit
-				// quickly now that the context is cancelled. This prevents a
-				// race between the goroutine and deferred cleanup (database close).
-				<-shutdownComplete
+				// Give the shutdown goroutine a brief grace period to exit.
+				// With the timeout-aware wg.Wait(), it should exit quickly
+				// after context cancellation. But if it doesn't, don't block
+				// forever — let deferred cleanup handle the rest.
+				select {
+				case <-shutdownComplete:
+					// Goroutine exited cleanly
+				case <-time.After(500 * time.Millisecond):
+					GetLogger().Warn("shutdown goroutine did not exit within grace period",
+						logger.String("operation", "shutdown_forced_exit"))
+				}
 				return nil
 			}
 

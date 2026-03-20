@@ -14,6 +14,7 @@ Props:
 <script lang="ts">
   import { Check, X } from '@lucide/svelte';
   import { fade } from 'svelte/transition';
+  import { untrack } from 'svelte';
   import { t } from '$lib/i18n';
   import type { PendingDetection } from '$lib/types/pending.types';
 
@@ -36,7 +37,9 @@ Props:
     return d.source + d.scientificName;
   }
 
-  // Track terminal detections and schedule their removal
+  // Track terminal detections and schedule their removal.
+  // Use untrack() when reading retainedKeys to avoid a read-write loop
+  // (this effect should only re-run when detections changes, not retainedKeys).
   $effect(() => {
     for (const d of detections) {
       const key = detectionKey(d);
@@ -47,8 +50,8 @@ Props:
           delete removalTimers[key];
           retainedKeys = retainedKeys.filter(k => k !== key);
         }, TERMINAL_RETENTION_MS);
-        if (!retainedKeys.includes(key)) {
-          retainedKeys = [...retainedKeys, key];
+        if (!untrack(() => retainedKeys).includes(key)) {
+          retainedKeys = [...untrack(() => retainedKeys), key];
         }
       }
     }

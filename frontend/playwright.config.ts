@@ -73,7 +73,7 @@ export default defineConfig({
     // dev_server only runs 'air realtime' which serves static assets
     command: 'task frontend-build && task dev_server',
     port: 8080,
-    reuseExistingServer: !process.env['CI'],
+    reuseExistingServer: true,
     timeout: 240000, // 4 minutes for cold machine startup
   },
 });

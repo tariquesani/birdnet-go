@@ -1805,8 +1805,16 @@ func (p *Processor) getDisplayNameForSource(sourceID string) string {
 	return privacy.SanitizeRTSPUrl(sourceID)
 }
 
-// Shutdown gracefully stops all processor components
+// Shutdown gracefully stops all processor components using a default combined timeout.
 func (p *Processor) Shutdown() error {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultFlushTimeout+30*time.Second)
+	defer cancel()
+	return p.ShutdownWithContext(ctx)
+}
+
+// ShutdownWithContext gracefully stops all processor components, respecting
+// the provided context deadline for all internal waits.
+func (p *Processor) ShutdownWithContext(ctx context.Context) error {
 	// Stop threshold persistence and cleanup goroutines first
 	if p.thresholdsCancel != nil {
 		p.thresholdsCancel()
@@ -1817,12 +1825,8 @@ func (p *Processor) Shutdown() error {
 		p.flusherCancel()
 	}
 
-	// Flush dynamic thresholds to database before shutting down with timeout
+	// Flush dynamic thresholds using the provided context deadline
 	if p.Settings.Realtime.DynamicThreshold.Enabled {
-		// Use context-based timeout for cleaner cancellation handling
-		ctx, cancel := context.WithTimeout(context.Background(), DefaultFlushTimeout)
-		defer cancel()
-
 		done := make(chan error, 1)
 		go func() {
 			done <- p.FlushDynamicThresholds()
@@ -1836,8 +1840,7 @@ func (p *Processor) Shutdown() error {
 					logger.String("operation", "shutdown_flush_thresholds"))
 			}
 		case <-ctx.Done():
-			GetLogger().Warn("Timeout flushing dynamic thresholds during shutdown",
-				logger.Int("timeout_seconds", int(DefaultFlushTimeout.Seconds())),
+			GetLogger().Warn("Context expired flushing dynamic thresholds during shutdown",
 				logger.String("operation", "shutdown_flush_thresholds"))
 		}
 	}
@@ -1852,12 +1855,30 @@ func (p *Processor) Shutdown() error {
 		p.preRenderer.Stop()
 	}
 
-	// Stop the job queue with a timeout
-	if err := p.JobQueue.StopWithTimeout(30 * time.Second); err != nil {
+	// Stop the job queue — use remaining context budget, not a hardcoded 30 seconds.
+	// Always send the stop signal even if the deadline has passed (remaining <= 0)
+	// so the queue's workers are notified and don't keep running after DB close.
+	// Check ctx.Err() first to handle cancellation without deadline (WithCancel).
+	queueStopTimeout := 30 * time.Second
+	if ctx.Err() != nil {
+		queueStopTimeout = 0
+	} else if deadline, ok := ctx.Deadline(); ok {
+		queueStopTimeout = max(time.Until(deadline), 0)
+	}
+
+	if err := p.JobQueue.StopWithTimeout(queueStopTimeout); err != nil {
 		GetLogger().Warn("Job queue shutdown timed out",
 			logger.Error(err),
-			logger.Int("timeout_seconds", 30),
 			logger.String("operation", "job_queue_shutdown"))
+	}
+
+	// Skip remaining cleanup if context is already expired — these are
+	// nice-to-have disconnects, not critical for data integrity.
+	// Context expiration is expected, not an error condition for the caller.
+	if ctx.Err() != nil {
+		GetLogger().Warn("Skipping non-critical cleanup (context expired)",
+			logger.String("operation", "processor_shutdown"))
+		return nil //nolint:nilerr // Context expiration during non-critical cleanup is acceptable; not a failure.
 	}
 
 	// Disconnect BirdWeather client

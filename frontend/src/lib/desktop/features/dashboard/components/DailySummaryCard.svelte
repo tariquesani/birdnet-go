@@ -68,7 +68,7 @@ Responsive Breakpoints:
     type TemperatureUnit,
   } from '$lib/utils/formatters';
   import { ChevronLeft, ChevronRight, Star, Sunrise, Sunset, XCircle } from '@lucide/svelte';
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import AnimatedCounter from './AnimatedCounter.svelte';
   import BirdThumbnailPopup from './BirdThumbnailPopup.svelte';
 
@@ -239,8 +239,9 @@ Responsive Breakpoints:
     }
   }
 
-  // Fetch dashboard config on mount
-  $effect(() => {
+  // Fetch dashboard config on mount (onMount, not $effect, to avoid
+  // reactive dependency tracking that can cascade during initialization)
+  onMount(() => {
     fetchDashboardConfig();
   });
 

@@ -249,8 +249,6 @@ docker exec birdnet-go cat /tmp/birdnet-startup.log
 ## Example docker-compose.yml
 
 ```yaml
-version: "3.8"
-
 services:
   birdnet-go:
     image: ghcr.io/tphakala/birdnet-go:latest

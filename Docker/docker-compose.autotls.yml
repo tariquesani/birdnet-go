@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   birdnet-go:
     image: ghcr.io/tphakala/birdnet-go:nightly

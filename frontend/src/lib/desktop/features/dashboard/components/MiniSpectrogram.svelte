@@ -16,6 +16,7 @@
   import Hls from 'hls.js';
   import ReconnectingEventSource from 'reconnecting-eventsource';
   import { onMount } from 'svelte';
+
   import { Volume, Volume1, Volume2, VolumeX, Play, Square } from '@lucide/svelte';
   import { t } from '$lib/i18n';
   import { appState, hasLiveAudioAccess } from '$lib/stores/appState.svelte';
@@ -64,6 +65,7 @@
   let audioElement: HTMLAudioElement | null = null;
   let heartbeatTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   let abortController: AbortController | null = null;
+  let activeSourceId: string | null = null;
 
   // Initialize composable during component init (must be at top level for $effect cleanup)
   const spectro = useSpectrogramAnalyser({ fftSize: FFT_SIZE, audioOutput: false });
@@ -166,6 +168,10 @@
 
       const encodedSourceId = encodeURIComponent(sourceId);
 
+      // Capture source before await so stop() can clean up if the request
+      // is aborted after the server processes it
+      activeSourceId = sourceId;
+
       const data = await fetchWithCSRF<{
         status: string;
         stream_token: string;
@@ -198,17 +204,22 @@
             /* autoplay blocked — spectrogram still renders */
           }
           if (signal.aborted) return;
+
+          // Mark as active BEFORE spectro.connect() — the connect may hang
+          // if AudioContext.resume() blocks on autoplay policy (no user gesture
+          // on page reload). The spectrogram canvas will show black until the
+          // context resumes, which is better than an infinite spinner.
+          startHeartbeat(activeStreamToken!);
+          isActive = true;
+          isConnecting = false;
+          persistToggleState(true);
+
           if (audioElement) {
             await spectro.connect(audioElement);
           }
           if (signal.aborted) {
             spectro.disconnect();
-            return;
           }
-          startHeartbeat(activeStreamToken!);
-          isActive = true;
-          isConnecting = false;
-          persistToggleState(true);
         });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -230,15 +241,17 @@
           /* autoplay blocked */
         }
         if (signal.aborted || !audioElement) return;
-        await spectro.connect(audioElement);
-        if (signal.aborted) {
-          spectro.disconnect();
-          return;
-        }
+
+        // Mark active before spectro.connect() — see MANIFEST_PARSED comment above
         startHeartbeat(activeStreamToken!);
         isActive = true;
         isConnecting = false;
         persistToggleState(true);
+
+        await spectro.connect(audioElement);
+        if (signal.aborted) {
+          spectro.disconnect();
+        }
       } else {
         // Browser supports neither HLS.js nor native HLS — tear down
         logger.warn('MiniSpectrogram: browser does not support HLS');
@@ -275,12 +288,24 @@
     }
   }
 
-  function stop() {
-    // Abort any in-flight async work first
+  // stopRuntime tears down the stream without clearing localStorage persistence.
+  // Used by $effect cleanup so reactive re-runs don't erase the user's play preference.
+  function stopRuntime() {
     abortController?.abort();
     abortController = null;
 
-    // Send disconnect heartbeat
+    // Send explicit stop for immediate server-side client removal
+    if (activeSourceId) {
+      const encodedSourceId = encodeURIComponent(activeSourceId);
+      fetchWithCSRF(`/api/v2/streams/hls/${encodedSourceId}/stop`, {
+        method: 'POST',
+        keepalive: true,
+        body: { session_id: sessionId },
+      }).catch(() => {});
+      activeSourceId = null;
+    }
+
+    // Send disconnect heartbeat as fallback
     if (activeStreamToken) {
       fetchWithCSRF('/api/v2/streams/hls/heartbeat?disconnect=true', {
         method: 'POST',
@@ -305,6 +330,12 @@
 
     isActive = false;
     isConnecting = false;
+  }
+
+  // stop tears down the stream AND clears the user's auto-start preference.
+  // Used by explicit user actions (stop button, fatal errors).
+  function stop() {
+    stopRuntime();
     persistToggleState(false);
   }
 
@@ -317,6 +348,12 @@
     }
   }
 
+  // Use onMount (NOT $effect) for auto-start. This is fire-once initialization:
+  // - $effect caused effect_update_depth_exceeded because start() reads $state
+  //   variables (isActive, isConnecting) which become tracked dependencies,
+  //   creating a cleanup→restart infinite loop.
+  // - The "re-run on auth change" use case ($effect) is not worth the complexity;
+  //   if a user logs in after mount, they can click the play button.
   onMount(() => {
     if (hasLiveAudioAccess() && shouldAutoStart()) {
       start();

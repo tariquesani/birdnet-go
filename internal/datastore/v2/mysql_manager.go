@@ -125,6 +125,8 @@ func (m *MySQLManager) Initialize() error {
 		&entities.AlertCondition{},
 		&entities.AlertAction{},
 		&entities.AlertHistory{},
+		// Application metadata
+		&entities.AppMetadata{},
 	)
 	if err != nil {
 		reportInitFailure("mysql", "AutoMigrate", err, m.config.Host, m.config.Database, m.config.Username)
@@ -265,6 +267,8 @@ func (m *MySQLManager) Delete() error {
 		prefix + "ai_models",
 		prefix + "taxonomic_classes",
 		prefix + "label_types",
+		// Application metadata (no dependencies)
+		prefix + "app_metadata",
 		// Migration tracking
 		prefix + "migration_states",
 		prefix + "migration_dirty_ids",

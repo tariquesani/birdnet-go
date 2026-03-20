@@ -11,6 +11,7 @@
   import Hls from 'hls.js';
   import ReconnectingEventSource from 'reconnecting-eventsource';
   import { onMount } from 'svelte';
+
   import { Radio, AlertCircle, Loader2, Play, Maximize, Minimize, Mic } from '@lucide/svelte';
   import { t } from '$lib/i18n';
   import { HLS_AUDIO_CONFIG, BUFFERING_STRATEGY } from '$lib/desktop/components/ui/hls-config';
@@ -64,6 +65,7 @@
   let heartbeatTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   let abortController: AbortController | null = null;
   let activeStreamToken: string | null = null;
+  let activeSourceId: string | null = null;
 
   // Initialize composable during component init (registers cleanup $effect)
   const spectro = useSpectrogramAnalyser({ fftSize: FFT_SIZE, audioOutput: true });
@@ -124,8 +126,12 @@
     abortController = controller;
     const { signal } = controller;
 
+    // Capture the source being started so stopStream() can clean up
+    // even if the request is aborted after the server processes it
+    activeSourceId = selectedSourceId;
+
     try {
-      const encodedSourceId = encodeURIComponent(selectedSourceId);
+      const encodedSourceId = encodeURIComponent(activeSourceId);
 
       // Start HLS stream on backend
       const data = await fetchWithCSRF<{
@@ -315,7 +321,18 @@
     abortController?.abort();
     abortController = null;
 
-    // Send disconnect heartbeat for the active stream
+    // Send explicit stop for the source that actually has an active stream
+    // (selectedSourceId may have changed if user switched sources before stop)
+    if (activeSourceId) {
+      const encodedSourceId = encodeURIComponent(activeSourceId);
+      fetchWithCSRF(`/api/v2/streams/hls/${encodedSourceId}/stop`, {
+        method: 'POST',
+        keepalive: true,
+        body: { session_id: sessionId },
+      }).catch(() => {});
+    }
+
+    // Also send disconnect heartbeat as fallback (keepalive ensures delivery during page unload)
     if (activeStreamToken) {
       fetchWithCSRF('/api/v2/streams/hls/heartbeat?disconnect=true', {
         method: 'POST',
@@ -339,6 +356,7 @@
     }
 
     activeStreamToken = null;
+    activeSourceId = null;
     isStreaming = false;
   }
 
@@ -365,6 +383,8 @@
     spectro.setGain(db);
   }
 
+  // Use onMount (NOT $effect) to avoid reactive dependency loops.
+  // See MiniSpectrogram.svelte for detailed explanation.
   onMount(() => {
     if (hasLiveAudioAccess()) {
       connectSSE();

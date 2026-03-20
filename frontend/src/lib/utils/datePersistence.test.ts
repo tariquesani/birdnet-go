@@ -278,10 +278,9 @@ describe('Date Persistence Utilities', () => {
     });
 
     it('handles storage quota exceeded gracefully', () => {
-      const mockSetItem = vi.fn().mockImplementation(() => {
+      vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => {
         throw new Error('QuotaExceededError');
       });
-      window.localStorage.setItem = mockSetItem;
 
       // Should not throw
       expect(() => setStoredDate(mockDate)).not.toThrow();
@@ -303,10 +302,9 @@ describe('Date Persistence Utilities', () => {
     });
 
     it('handles errors gracefully', () => {
-      const mockRemoveItem = vi.fn().mockImplementation(() => {
+      vi.spyOn(window.localStorage, 'removeItem').mockImplementation(() => {
         throw new Error('RemoveItem failed');
       });
-      window.localStorage.removeItem = mockRemoveItem;
 
       // Should not throw
       expect(() => clearStoredDate()).not.toThrow();

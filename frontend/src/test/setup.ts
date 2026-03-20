@@ -10,6 +10,50 @@
 import '@testing-library/jest-dom';
 import { vi } from 'vitest';
 
+// Polyfill localStorage for Node.js 22+ where native localStorage exists but
+// methods are undefined without a valid --localstorage-file path. This broken
+// native object shadows jsdom's working implementation in worker_threads (pool: 'threads').
+if (
+  typeof globalThis.localStorage === 'undefined' ||
+  typeof globalThis.localStorage.getItem !== 'function'
+) {
+  const store = new Map<string, string>();
+  const localStoragePolyfill = {
+    getItem(key: string): string | null {
+      return store.get(key) ?? null;
+    },
+    setItem(key: string, value: string): void {
+      store.set(key, String(value));
+    },
+    removeItem(key: string): void {
+      store.delete(key);
+    },
+    clear(): void {
+      store.clear();
+    },
+    get length(): number {
+      return store.size;
+    },
+    key(index: number): string | null {
+      const keys = [...store.keys()];
+      return keys[index] ?? null;
+    },
+  };
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: localStoragePolyfill,
+    writable: true,
+    configurable: true,
+  });
+  // Also set on window if it exists
+  if (typeof window !== 'undefined') {
+    Object.defineProperty(window, 'localStorage', {
+      value: localStoragePolyfill,
+      writable: true,
+      configurable: true,
+    });
+  }
+}
+
 // Note: API utilities are not mocked globally to allow their own tests to run
 // Component tests that need API mocks should mock them individually
 

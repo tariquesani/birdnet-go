@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,6 +57,10 @@ const (
 	hlsDefaultSampleRate            = 48000            // Default audio sample rate in Hz
 	hlsCleanupDelay                 = 5                // Delay in seconds before cleanup
 	hlsPrematureDisconnectThreshold = 10 * time.Second // Ignore disconnects within this window
+
+	// fifoWriteTimeout is the maximum duration a single FIFO write can block
+	// before being considered hung. Normal writes complete in microseconds.
+	fifoWriteTimeout = 30 * time.Second
 
 	// Session ID validation
 
@@ -297,22 +302,23 @@ func (c *Controller) StartHLSStream(ctx echo.Context) error {
 		return c.buildHLSStreamResponse(ctx, sourceID, existingStream)
 	}
 
-	// Cleanup existing stream if force restart requested
+	// Create or get the HLS stream (force-restart uses atomic cleanup+create)
+	var stream *HLSStreamInfo
 	if forceRestart {
-		c.cleanupExistingHLSStream(sourceID)
+		stream, err = c.forceCreateHLSStream(sourceID)
+	} else {
+		stream, err = c.getOrCreateHLSStream(sourceID)
 	}
-
-	// Register client and update activity with grace period
-	c.updateHLSActivity(sourceID, clientID, "stream_start", hlsNewStreamGracePeriod)
-
-	// Create or get the HLS stream
-	stream, err := c.getOrCreateHLSStream(sourceID)
 	if err != nil {
 		c.logAPIRequest(ctx, logger.LogLevelError, "Failed to create HLS stream",
 			logger.String("source_id", privacy.SanitizeRTSPUrl(sourceID)),
 			logger.Error(err))
 		return c.HandleError(ctx, err, "Failed to start audio stream", http.StatusInternalServerError)
 	}
+
+	// Register client AFTER stream creation so force-restart gets clean tracking
+	// (forceCreateHLSStream clears stale tracking before creating the new stream)
+	c.updateHLSActivity(sourceID, clientID, "stream_start", hlsNewStreamGracePeriod)
 
 	// Check if playlist is ready
 	playlistReady := c.waitForHLSPlaylist(ctx, sourceID, stream)
@@ -515,16 +521,14 @@ func (c *Controller) ServeHLSPlaylist(ctx echo.Context) error {
 		return c.HandleError(ctx, nil, "Stream not found", http.StatusNotFound)
 	}
 
-	clientID := c.generateClientID(ctx)
-
 	// Get stream info
 	stream := c.getHLSStream(sourceID)
 	if stream == nil {
 		return c.HandleError(ctx, nil, "Stream not found", http.StatusNotFound)
 	}
 
-	// Update activity
-	c.updateHLSActivity(sourceID, clientID, "playlist_request")
+	// Update stream-level activity (no client registration — lifecycle managed by start/stop/heartbeat)
+	c.updateStreamActivity(sourceID)
 
 	// Get HLS base directory
 	hlsBaseDir, err := conf.GetHLSDirectory()
@@ -579,7 +583,6 @@ func (c *Controller) ServeHLSContent(ctx echo.Context) error {
 		return c.HandleError(ctx, nil, "Stream not found", http.StatusNotFound)
 	}
 
-	clientID := c.generateClientID(ctx)
 	requestPath := ctx.Param("*")
 
 	// Decode URL path
@@ -594,8 +597,8 @@ func (c *Controller) ServeHLSContent(ctx echo.Context) error {
 		return c.HandleError(ctx, nil, "Stream not found", http.StatusNotFound)
 	}
 
-	// Update activity for segment requests
-	c.updateHLSActivity(sourceID, clientID, "segment_request")
+	// Update stream-level activity (no client registration — lifecycle managed by start/stop/heartbeat)
+	c.updateStreamActivity(sourceID)
 
 	// Log client connection (rate-limited)
 	c.logHLSClientConnection(sourceID, ctx.RealIP(), decodedPath)
@@ -762,6 +765,29 @@ func (c *Controller) getOrCreateHLSStream(sourceID string) (*HLSStreamInfo, erro
 	return result.(*HLSStreamInfo), nil
 }
 
+// forceCreateHLSStream cleans up any existing stream and creates a new one,
+// atomically under the singleflight gate to prevent cleanup/creation races.
+func (c *Controller) forceCreateHLSStream(sourceID string) (*HLSStreamInfo, error) {
+	result, err, _ := hlsMgr.streamCreate.Do(sourceID, func() (any, error) {
+		// Phase 1: Synchronous cleanup under singleflight serialization.
+		// This prevents a concurrent request from creating a new stream
+		// while the old one's directory is still being deleted.
+		c.cleanupExistingHLSStream(sourceID)
+
+		// Phase 2: Clear stale tracking data (clients, activity) from the
+		// old stream so the replacement starts with a clean slate.
+		c.cleanupStreamTracking(sourceID)
+
+		// Phase 3: Create new stream (directory path is deterministic,
+		// so cleanup must complete before creation).
+		return c.createHLSStream(sourceID)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*HLSStreamInfo), nil
+}
+
 // createHLSStream creates a new HLS stream (called under singleflight serialization).
 func (c *Controller) createHLSStream(sourceID string) (*HLSStreamInfo, error) {
 	GetLogger().Info("Creating new HLS stream", logger.String("source_id", privacy.SanitizeRTSPUrl(sourceID)))
@@ -865,9 +891,18 @@ func (c *Controller) createHLSStream(sourceID string) (*HLSStreamInfo, error) {
 	// Initialize activity
 	c.updateHLSActivity(sourceID, "", "stream_creation")
 
-	// Start audio feed (non-Windows platforms)
+	// Start audio feed (non-Windows platforms).
+	// If the feed goroutine exits abnormally (not due to context cancellation),
+	// cancel the stream context to trigger cleanup via the context goroutine below.
 	if runtime.GOOS != OSWindows {
-		go c.feedAudioToFFmpeg(sourceID, stream.FifoPipe, stream.ctx)
+		go func() {
+			c.feedAudioToFFmpeg(stream.ctx, sourceID, stream.FifoPipe)
+			if stream.ctx.Err() == nil {
+				GetLogger().Warn("Audio feed exited unexpectedly, cancelling stream",
+					logger.String("source_id", privacy.SanitizeRTSPUrl(sourceID)))
+				stream.cancel()
+			}
+		}()
 	}
 
 	// Start context cleanup goroutine — pass stream pointer to verify identity
@@ -947,7 +982,22 @@ func (c *Controller) setupHLSFifo(secFS *securefs.SecureFS, hlsBaseDir, outputDi
 func (c *Controller) setupHLSFFmpeg(ctx context.Context, ffmpegPath, inputSource, outputDir, playlistPath string) (*exec.Cmd, error) {
 	args := c.buildFFmpegArgs(inputSource, outputDir, playlistPath)
 	//nolint:gosec // G204: ffmpegPath is from admin config (Settings.Realtime.Audio.FfmpegPath), not user input
-	return exec.CommandContext(ctx, ffmpegPath, args...), nil
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+
+	// Graceful shutdown: send SIGINT first (lets FFmpeg flush output buffers),
+	// escalate to SIGKILL after WaitDelay if it hasn't exited.
+	// Windows doesn't support SIGINT; exec.CommandContext defaults to TerminateProcess.
+	if runtime.GOOS != OSWindows {
+		cmd.Cancel = func() error {
+			if cmd.Process == nil {
+				return nil
+			}
+			return cmd.Process.Signal(syscall.SIGINT)
+		}
+	}
+	cmd.WaitDelay = 5 * time.Second
+
+	return cmd, nil
 }
 
 // buildFFmpegArgs constructs FFmpeg command line arguments
@@ -1124,8 +1174,32 @@ func (c *Controller) setupAudioCallback(sourceID string) (audioChan chan []byte,
 	return audioChan, cleanup, nil
 }
 
+// writeToFIFO performs a context-aware write to the FIFO pipe.
+// If the context is cancelled or the write exceeds fifoWriteTimeout,
+// it returns immediately. The orphaned write goroutine is cleaned up
+// when the caller's defer closes the FIFO (unblocking the write with an error).
+func writeToFIFO(ctx context.Context, fifo *os.File, data []byte) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := fifo.Write(data)
+		done <- err
+	}()
+
+	timer := time.NewTimer(fifoWriteTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("FIFO write timeout: FFmpeg may be unresponsive")
+	}
+}
+
 // feedAudioToFFmpeg feeds audio data to FFmpeg via FIFO (Unix platforms)
-func (c *Controller) feedAudioToFFmpeg(sourceID, pipePath string, ctx context.Context) {
+func (c *Controller) feedAudioToFFmpeg(ctx context.Context, sourceID, pipePath string) {
 	sanitizedID := privacy.SanitizeRTSPUrl(sourceID)
 	GetLogger().Debug("Starting audio feed", logger.String("source_id", sanitizedID), logger.String("pipe_path", pipePath))
 
@@ -1184,8 +1258,12 @@ func (c *Controller) feedAudioToFFmpeg(sourceID, pipePath string, ctx context.Co
 				return
 			}
 
-			if _, err := fifo.Write(data); err != nil {
-				GetLogger().Error("Error writing to FIFO", logger.Error(err))
+			if err := writeToFIFO(ctx, fifo, data); err != nil {
+				if ctx.Err() != nil {
+					GetLogger().Debug("Audio feed stopped due to context cancellation", logger.String("source_id", sanitizedID))
+				} else {
+					GetLogger().Error("Error writing to FIFO", logger.Error(err))
+				}
 				return
 			}
 
@@ -1225,6 +1303,15 @@ func (c *Controller) updateHLSActivity(sourceID, clientID, activityType string, 
 		extraTime = gracePeriod[0]
 	}
 	hlsMgr.activity[sourceID] = time.Now().Add(extraTime)
+	hlsMgr.activityMu.Unlock()
+}
+
+// updateStreamActivity updates stream-level activity without registering a client.
+// Used by playlist/segment handlers where session context is not available,
+// preventing ghost client entries from non-session-aware traffic.
+func (c *Controller) updateStreamActivity(sourceID string) {
+	hlsMgr.activityMu.Lock()
+	hlsMgr.activity[sourceID] = time.Now()
 	hlsMgr.activityMu.Unlock()
 }
 
@@ -1309,10 +1396,11 @@ func (c *Controller) cleanupExistingHLSStream(sourceID string) {
 	removeStreamToken(sourceID)
 	hlsMgr.streamsMu.Unlock()
 
-	// Wait for process termination
-	if cmd != nil && cmd.Process != nil {
-		if _, err := cmd.Process.Wait(); err != nil {
-			GetLogger().Error("Failed to wait for FFmpeg process", logger.Error(err))
+	// Wait for process termination using cmd.Wait() (not cmd.Process.Wait())
+	// so that cmd.Cancel/cmd.WaitDelay escalation to SIGKILL works correctly.
+	if cmd != nil {
+		if err := cmd.Wait(); err != nil {
+			GetLogger().Debug("FFmpeg process exited during cleanup", logger.Error(err))
 		}
 	}
 
@@ -1382,10 +1470,11 @@ func (c *Controller) performHLSCleanup(sourceID string, stream *HLSStreamInfo, r
 }
 
 // cleanupFFmpegProcess terminates the FFmpeg process and closes the log file.
+// Waits synchronously for the process to exit so that callers can safely
+// remove the output directory afterward (cmd.WaitDelay caps the wait at 5s).
 func (c *Controller) cleanupFFmpegProcess(sourceID string, stream *HLSStreamInfo) {
-	hasProcess := stream.FFmpegCmd != nil && stream.FFmpegCmd.Process != nil
-	if hasProcess {
-		go c.waitForFFmpegProcess(sourceID, stream.FFmpegCmd, stream.logFile)
+	if stream.FFmpegCmd != nil && stream.FFmpegCmd.Process != nil {
+		c.waitForFFmpegProcess(sourceID, stream.FFmpegCmd, stream.logFile)
 		return
 	}
 	// No process, just close log file if present
@@ -1393,9 +1482,11 @@ func (c *Controller) cleanupFFmpegProcess(sourceID string, stream *HLSStreamInfo
 }
 
 // waitForFFmpegProcess waits for FFmpeg to exit and cleans up resources.
+// Uses cmd.Wait() (not cmd.Process.Wait()) so that cmd.Cancel/cmd.WaitDelay
+// escalation to SIGKILL works correctly.
 func (c *Controller) waitForFFmpegProcess(sourceID string, cmd *exec.Cmd, logFile *os.File) {
-	if _, err := cmd.Process.Wait(); err != nil {
-		GetLogger().Error("FFmpeg process wait error", logger.Error(err))
+	if err := cmd.Wait(); err != nil {
+		GetLogger().Debug("FFmpeg process exited", logger.Error(err))
 	}
 	closeLogFile(logFile)
 	GetLogger().Debug("FFmpeg process terminated", logger.String("source_id", privacy.SanitizeRTSPUrl(sourceID)))
@@ -1413,6 +1504,12 @@ func closeLogFile(f *os.File) {
 
 // cleanupStreamTracking removes all tracking data for a stream.
 func (c *Controller) cleanupStreamTracking(sourceID string) {
+	cleanupStreamTrackingData(sourceID)
+}
+
+// cleanupStreamTrackingData removes all tracking data for a stream from the global manager.
+// Package-level function so it can be called from both Controller methods and standalone functions.
+func cleanupStreamTrackingData(sourceID string) {
 	// Clean up client tracking
 	hlsMgr.clientsMu.Lock()
 	delete(hlsMgr.clients, sourceID)
@@ -1702,9 +1799,11 @@ func cleanupStream(s *HLSStreamInfo, sourceID string) {
 		s.cancel()
 	}
 
-	if s.FFmpegCmd != nil && s.FFmpegCmd.Process != nil {
-		if _, err := s.FFmpegCmd.Process.Wait(); err != nil {
-			GetLogger().Error("Failed to wait for FFmpeg process", logger.Error(err))
+	// Use cmd.Wait() (not cmd.Process.Wait()) so that cmd.Cancel/cmd.WaitDelay
+	// escalation to SIGKILL works correctly.
+	if s.FFmpegCmd != nil {
+		if err := s.FFmpegCmd.Wait(); err != nil {
+			GetLogger().Debug("FFmpeg process exited during cleanup", logger.Error(err))
 		}
 	}
 
@@ -1716,6 +1815,10 @@ func cleanupStream(s *HLSStreamInfo, sourceID string) {
 	}
 
 	cleanupStreamDirectory(s.OutputDir)
+
+	// Clean up tracking data (clients, activity) so stale entries don't persist
+	cleanupStreamTrackingData(sourceID)
+
 	GetLogger().Debug("Cleaned up inactive stream", logger.String("source_id", privacy.SanitizeRTSPUrl(sourceID)))
 }
 

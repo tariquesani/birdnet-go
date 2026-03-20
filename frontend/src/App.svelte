@@ -11,6 +11,11 @@
   import { navigation } from './lib/stores/navigation.svelte';
   import { settingsActions } from './lib/stores/settings.js';
   import { activateWatchdog } from './lib/stores/connectionState.svelte';
+  import WizardDialog from './lib/desktop/features/wizard/WizardDialog.svelte';
+  import {
+    wizardState,
+    WIZARD_DISMISSED_VERSION_KEY,
+  } from './lib/desktop/features/wizard/wizardState.svelte';
 
   const logger = getLogger('app');
 
@@ -448,6 +453,41 @@
     handleRouting(currentPath);
   });
 
+  // Wizard trigger: launch after first route loads
+  let wizardChecked = $state(false);
+  $effect(() => {
+    if (!appInitialized || loadingComponent || wizardChecked) return;
+    wizardChecked = true;
+
+    // Fresh install always shows onboarding, regardless of localStorage
+    if (appState.freshInstall) {
+      wizardState.launch('onboarding', {
+        currentVersion: appState.version,
+      });
+      return;
+    }
+
+    // For updates, check localStorage fallback before triggering what's-new
+    try {
+      const dismissedVersion = localStorage.getItem(WIZARD_DISMISSED_VERSION_KEY);
+      if (dismissedVersion === appState.version) return;
+    } catch {
+      // localStorage unavailable (private browsing, etc.) — proceed with wizard check
+    }
+
+    if (appState.newVersion) {
+      wizardState.launch('whats-new', {
+        previousVersion: appState.previousVersion ?? undefined,
+        currentVersion: appState.version,
+      });
+      // If no changelog steps matched (e.g., pre-wizard install with empty
+      // previousVersion), auto-dismiss to prevent repeated triggering on reload
+      if (!wizardState.isActive) {
+        wizardState.dismissOnly(appState.version);
+      }
+    }
+  });
+
   // Use $effect for browser back/forward navigation with automatic cleanup
   $effect(() => {
     const handlePopState = () => {
@@ -556,4 +596,6 @@
       {/if}
     {/if}
   </RootLayout>
+
+  <WizardDialog />
 {/if}
