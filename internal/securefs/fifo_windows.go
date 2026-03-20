@@ -3,7 +3,9 @@
 package securefs
 
 import (
+	"context"
 	"crypto/sha1"
+	"hash/crc32"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -190,4 +192,49 @@ func openNamedPipePlatform(sfs *SecureFS, pipePath string) (*os.File, error) {
 	})
 
 	return file, nil
+}
+
+// GetFIFOPath returns the platform-specific FIFO identifier for the given path.
+// On Windows we map it to a named-pipe path using a stable CRC32-based scheme.
+func GetFIFOPath(path string) string {
+	baseName := filepath.Base(path)
+	ext := filepath.Ext(baseName)
+	pipeName := fmt.Sprintf("%s_%x", strings.TrimSuffix(baseName, ext), crc32.ChecksumIEEE([]byte(path)))
+	return `\\.\pipe\` + pipeName
+}
+
+// CreateFIFO creates a FIFO (named pipe) at the specified path.
+// Windows doesn't support Unix-style FIFOs, so this creates a Windows named pipe.
+func (sfs *SecureFS) CreateFIFO(path string) error {
+	// Validate the path is within the base directory (lexical sandboxing).
+	if err := IsPathValidWithinBase(sfs.baseDir, path); err != nil {
+		return errors.New(err).Component(componentSecurefs).Category(errors.CategoryFileIO).Context("operation", "create_fifo").Build()
+	}
+
+	pipeName, err := createFIFOPlatform(path)
+	if err != nil {
+		return errors.New(err).Component(componentSecurefs).Category(errors.CategoryFileIO).Context("operation", "create_fifo_platform").Build()
+	}
+
+	sfs.pipeName = pipeName
+	return nil
+}
+
+// OpenFIFO opens the FIFO at the given path.
+// On Windows this opens the named pipe that was created during CreateFIFO.
+func (sfs *SecureFS) OpenFIFO(_ context.Context, path string) (*os.File, error) {
+	if err := IsPathValidWithinBase(sfs.baseDir, path); err != nil {
+		return nil, errors.New(err).Component(componentSecurefs).Category(errors.CategoryFileIO).Context("operation", "open_fifo").Build()
+	}
+
+	if sfs.pipeName == "" {
+		return nil, errors.Newf("pipe name not set for opened FIFO path: %s", path).Component(componentSecurefs).Category(errors.CategoryFileIO).Context("operation", "open_fifo").Build()
+	}
+
+	return sfs.OpenNamedPipe(sfs.pipeName)
+}
+
+// OpenNamedPipe opens the Windows named pipe at pipePath.
+func (sfs *SecureFS) OpenNamedPipe(pipePath string) (*os.File, error) {
+	return openNamedPipePlatform(sfs, pipePath)
 }

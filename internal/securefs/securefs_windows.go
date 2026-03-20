@@ -15,7 +15,93 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
+
+const componentSecurefs = "securefs"
+
+// GetLogger returns the securefs package logger scoped to the securefs module.
+// The logger is fetched from the global logger each time to ensure it uses
+// the current centralized logger (which may be set after package init).
+func GetLogger() logger.Logger {
+	return logger.Global().Module("securefs")
+}
+
+// ErrFileTooLarge is returned when a file exceeds the configured size limit.
+var ErrFileTooLarge = errors.NewStd("file size exceeds maximum allowed size")
+
+// IsPathWithinBase checks if targetPath is within or equal to basePath (lexically on Windows).
+// This intentionally does not perform symlink resolution.
+func IsPathWithinBase(basePath, targetPath string) (bool, error) {
+	return IsPathWithinBaseWithCache(nil, basePath, targetPath)
+}
+
+// IsPathWithinBaseWithCache checks if targetPath is within or equal to basePath with optional caching.
+// On Windows we perform lexical checks and ignore cache.
+func IsPathWithinBaseWithCache(_ *PathCache, basePath, targetPath string) (bool, error) {
+	absBase, err := filepath.Abs(basePath)
+	if err != nil {
+		return false, errors.New(err).Component(componentSecurefs).Category(errors.CategoryValidation).Context("operation", "resolve_base_path").Build()
+	}
+	absBase = filepath.Clean(absBase)
+
+	if targetPath == "" {
+		return true, nil
+	}
+
+	// For relative targets, interpret them as relative to the base directory.
+	if !filepath.IsAbs(targetPath) {
+		targetPath = filepath.Join(absBase, targetPath)
+	}
+
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return false, errors.New(err).Component(componentSecurefs).Category(errors.CategoryValidation).Context("operation", "resolve_target_path").Build()
+	}
+	absTarget = filepath.Clean(absTarget)
+
+	// Defense-in-depth: reject Windows reserved/device-like names in the final path component.
+	if !filepath.IsLocal(filepath.Base(absTarget)) {
+		return false, nil
+	}
+
+	rel, err := filepath.Rel(absBase, absTarget)
+	if err != nil {
+		return false, errors.New(err).Component(componentSecurefs).Category(errors.CategoryValidation).Context("operation", "relativize_path").Build()
+	}
+
+	// absTarget == absBase.
+	if rel == "." {
+		return true, nil
+	}
+
+	// Outside base.
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// IsPathValidWithinBase checks if path is within baseDir (lexically on Windows) and returns an error if not.
+func IsPathValidWithinBase(baseDir, path string) error {
+	isWithin, err := IsPathWithinBase(baseDir, path)
+	if err != nil {
+		// If the error is because the target doesn't exist, don't treat it as a security error.
+		// This mirrors non-Windows behavior used during cleanup.
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return errors.New(err).Component(componentSecurefs).Category(errors.CategoryValidation).Context("operation", "path_validation").Build()
+	}
+
+	if !isWithin {
+		return errors.New(ErrPathTraversal).Component(componentSecurefs).Category(errors.CategoryValidation).Context("operation", "path_outside_base").Build()
+	}
+
+	return nil
+}
 
 // SecureFS provides filesystem operations with path validation on Windows.
 // This implementation uses lexical sandboxing under baseDir and os.* calls,
@@ -146,6 +232,11 @@ func (sfs *SecureFS) Rename(oldpath, newpath string) error {
 
 // OpenFile opens a file under the sandbox root.
 func (sfs *SecureFS) OpenFile(path string, flag int, perm os.FileMode) (*os.File, error) {
+	// Named pipes (e.g. \\.\pipe\...) are not normal filesystem paths; bypass baseDir sandboxing.
+	if strings.HasPrefix(path, `\\.\pipe\`) {
+		return os.OpenFile(path, flag, perm)
+	}
+
 	abs, err := sfs.absUnderBase(path)
 	if err != nil {
 		return nil, err
@@ -231,7 +322,7 @@ func (sfs *SecureFS) ReadFile(path string) ([]byte, error) {
 			return nil, err
 		}
 		if info.Size() > sfs.maxReadFileSize {
-			return nil, fmt.Errorf("file too large: %d > %d", info.Size(), sfs.maxReadFileSize)
+			return nil, errors.New(ErrFileTooLarge).Component(componentSecurefs).Category(errors.CategoryFileIO).Context("operation", "read_file_size_check").Build()
 		}
 	}
 
