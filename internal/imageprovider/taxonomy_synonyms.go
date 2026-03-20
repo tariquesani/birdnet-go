@@ -7,6 +7,9 @@ package imageprovider
 import (
 	"strings"
 	"sync"
+
+	"github.com/tphakala/birdnet-go/internal/detection"
+	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
 // builtInTaxonomySynonyms maps BirdNET scientific names (2021E taxonomy) to their updated
@@ -57,10 +60,55 @@ func init() {
 // SetCustomSynonyms replaces the current config-based synonym overrides and
 // rebuilds the cached lookup maps. Safe for concurrent use.
 // Call this when settings are loaded or hot-reloaded.
-func SetCustomSynonyms(overrides map[string]string) {
+// knownLabels is the list of BirdNET labels (e.g., "ScientificName_CommonName")
+// used to warn about override keys that don't match any known species.
+func SetCustomSynonyms(overrides map[string]string, knownLabels []string) {
+	// Validate override keys against known labels (advisory only).
+	if len(overrides) > 0 && len(knownLabels) > 0 {
+		knownScientific := make(map[string]bool, len(knownLabels))
+		for _, label := range knownLabels {
+			sp := detection.ParseSpeciesString(label)
+			knownScientific[strings.ToLower(sp.ScientificName)] = true
+		}
+		for old := range overrides {
+			trimmed := strings.TrimSpace(old)
+			if trimmed == "" {
+				continue
+			}
+			if !knownScientific[strings.ToLower(trimmed)] {
+				GetLogger().Warn("taxonomy synonym override key does not match any known BirdNET label",
+					logger.String("key", trimmed))
+			}
+		}
+	}
+
 	synonymMu.Lock()
-	defer synonymMu.Unlock()
 	cachedForward, cachedReverse = buildSynonymIndexes(overrides)
+	totalCount := len(cachedForward)
+	synonymMu.Unlock()
+
+	// Log summary of applied synonyms (outside the lock).
+	overrideCount := len(overrides)
+	if overrideCount > 0 {
+		// Identify which built-in keys were replaced by overrides.
+		replaced := make([]string, 0, len(builtInTaxonomySynonyms))
+		for old := range builtInTaxonomySynonyms {
+			lowerOld := strings.ToLower(old)
+			for overrideKey := range overrides {
+				if strings.ToLower(strings.TrimSpace(overrideKey)) == lowerOld {
+					replaced = append(replaced, old)
+					break
+				}
+			}
+		}
+		GetLogger().Debug("taxonomy synonyms rebuilt",
+			logger.Int("userOverrides", overrideCount),
+			logger.Int("totalSynonyms", totalCount),
+			logger.Any("replacedBuiltIns", replaced))
+	} else {
+		GetLogger().Debug("taxonomy synonyms rebuilt from built-ins only",
+			logger.Int("totalSynonyms", totalCount))
+	}
 }
 
 // buildSynonymIndexes builds normalized forward and reverse lookup maps using

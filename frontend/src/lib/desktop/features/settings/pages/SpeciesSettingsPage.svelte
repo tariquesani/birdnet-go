@@ -9,6 +9,7 @@
   - Always exclude species list management
   - Custom species configurations with threshold and interval settings
   - Action configuration for species-specific commands
+  - Taxonomy synonym override management for image lookups
   - Species autocomplete with API-loaded predictions
   - Real-time validation and change detection
   
@@ -27,6 +28,7 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
   import SpeciesInput from '$lib/desktop/components/forms/SpeciesInput.svelte';
+  import TextInput from '$lib/desktop/components/forms/TextInput.svelte';
   import Checkbox from '$lib/desktop/components/forms/Checkbox.svelte';
   import SelectDropdown from '$lib/desktop/components/forms/SelectDropdown.svelte';
   import type { SelectOption } from '$lib/desktop/components/forms/SelectDropdown.types';
@@ -53,6 +55,7 @@
   import { api, ApiError } from '$lib/utils/api';
   import { getLocalDateString } from '$lib/utils/date';
   import {
+    ArrowLeftRight,
     ChevronRight,
     Plus,
     SquarePen,
@@ -212,6 +215,10 @@
   // Lookup map: commonName (lowercase) → scientificName, built from species API
   let speciesScientificNameMap = $state(new Map<string, string>());
 
+  // Scientific name predictions for taxonomy synonym autocomplete
+  // Format: "ScientificName (CommonName)"
+  let scientificNamePredictions = $state<string[]>([]);
+
   // PERFORMANCE OPTIMIZATION: Derived species list
   let allSpecies = $derived(speciesListState.data);
 
@@ -258,6 +265,74 @@
     });
   }
 
+  // Taxonomy synonyms management
+  function updateSynonymPredictions(input: string) {
+    synonymError = '';
+    if (!input || input.length < 2) {
+      synonymPredictions = [];
+      return;
+    }
+    const lower = input.toLowerCase();
+    synonymPredictions = scientificNamePredictions
+      .filter(p => p.toLowerCase().includes(lower))
+      .slice(0, 10);
+  }
+
+  function extractScientificName(prediction: string): string {
+    // Format: "ScientificName (CommonName)" — extract before the first opening paren
+    // Use indexOf (not lastIndexOf) since scientific names never contain parentheses
+    // but common names can, e.g., "Herring Gull (European)"
+    const parenIndex = prediction.indexOf(' (');
+    return parenIndex > 0 ? prediction.substring(0, parenIndex).trim() : prediction.trim();
+  }
+
+  function addSynonym() {
+    synonymError = '';
+    const birdnetName = synonymBirdnetName.trim();
+    const updatedName = synonymUpdatedName.trim();
+
+    // Validate updated name is not empty
+    if (!updatedName) {
+      synonymError = t('settings.species.synonyms.errors.emptyUpdatedName');
+      return;
+    }
+
+    // Validate BirdNET name matches a known label (case-insensitive)
+    if (!knownScientificNames.has(birdnetName.toLowerCase())) {
+      synonymError = t('settings.species.synonyms.errors.unknownSpecies');
+      return;
+    }
+
+    // Check for duplicate keys (case-insensitive)
+    const existingKeys = Object.keys(synonyms).map(k => k.toLowerCase());
+    if (existingKeys.includes(birdnetName.toLowerCase())) {
+      synonymError = t('settings.species.synonyms.errors.duplicateKey');
+      return;
+    }
+
+    // Add the synonym
+    const updated = { ...synonyms, [birdnetName]: updatedName };
+    settingsActions.updateTaxonomySynonyms(updated);
+
+    // Reset form
+    synonymBirdnetName = '';
+    synonymUpdatedName = '';
+    synonymPredictions = [];
+    synonymError = '';
+  }
+
+  function removeSynonym(key: string) {
+    const updated = { ...synonyms };
+    // eslint-disable-next-line security/detect-object-injection -- key is from Object.entries iteration
+    delete updated[key];
+    settingsActions.updateTaxonomySynonyms(updated);
+  }
+
+  function handleSynonymPredictionSelect(prediction: string) {
+    synonymBirdnetName = extractScientificName(prediction);
+    synonymPredictions = [];
+  }
+
   // PERFORMANCE OPTIMIZATION: Reactive change detection with $derived
   let includeHasChanges = $derived(
     hasSettingsChanged(
@@ -286,6 +361,21 @@
       store.formData.realtime?.speciesTracking
     )
   );
+
+  let synonymsHasChanges = $derived(
+    hasSettingsChanged(store.originalData.taxonomySynonyms, store.formData.taxonomySynonyms)
+  );
+
+  // Taxonomy synonyms state
+  let synonyms = $derived(store.formData.taxonomySynonyms ?? {});
+  let synonymCount = $derived(Object.keys(synonyms).length);
+  let knownScientificNames = $derived(
+    new Set(Array.from(speciesScientificNameMap.values()).map(n => n.toLowerCase()))
+  );
+  let synonymBirdnetName = $state('');
+  let synonymUpdatedName = $state('');
+  let synonymError = $state('');
+  let synonymPredictions = $state<string[]>([]);
 
   // Tracking settings state
   let trackingSettings = $derived($speciesTrackingSettings);
@@ -473,6 +563,11 @@
         }
       }
       speciesScientificNameMap = map;
+
+      // Build scientific name predictions for taxonomy synonym autocomplete
+      scientificNamePredictions = speciesList
+        .filter(s => s.scientificName)
+        .map(s => `${s.scientificName} (${s.commonName || s.label})`);
     } catch (error) {
       logger.error('Failed to load species data:', error);
       // Provide specific error messages based on status code
@@ -944,6 +1039,13 @@
       icon: Settings2,
       content: configTabContent,
       hasChanges: configHasChanges,
+    },
+    {
+      id: 'synonyms',
+      label: t('settings.species.synonyms.tabLabel'),
+      icon: ArrowLeftRight,
+      content: synonymsTabContent,
+      hasChanges: synonymsHasChanges,
     },
     {
       id: 'tracking',
@@ -1555,6 +1657,104 @@
           </p>
         </div>
       {/if}
+    </div>
+  </div>
+{/snippet}
+
+<!-- Taxonomy Synonyms Tab Content -->
+{#snippet synonymsTabContent()}
+  <div class="space-y-4">
+    <SettingsNote>
+      <p>{t('settings.species.synonyms.description')}</p>
+    </SettingsNote>
+
+    <!-- Add Synonym Form -->
+    <div class="bg-[var(--surface-100)] border border-[var(--border-100)] rounded-xl shadow-sm">
+      <div class="flex items-center gap-2 px-4 py-3 border-b border-[var(--border-100)]">
+        <div class="p-1.5 rounded-lg bg-violet-500/10">
+          <ArrowLeftRight class="w-4 h-4 text-violet-500" />
+        </div>
+        <h3 class="text-xs font-semibold uppercase tracking-wider text-muted">
+          {t('settings.species.synonyms.tabLabel')}
+        </h3>
+        {#if synonymCount > 0}
+          <span
+            class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-500/10 text-muted"
+          >
+            {synonymCount}
+          </span>
+        {/if}
+      </div>
+
+      <div class="p-4 space-y-4">
+        <!-- Add form -->
+        <div class="grid grid-cols-1 lg:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+          <SpeciesInput
+            bind:value={synonymBirdnetName}
+            label={t('settings.species.synonyms.birdnetName')}
+            predictions={synonymPredictions}
+            disabled={store.isLoading || store.isSaving}
+            onInput={updateSynonymPredictions}
+            onPredictionSelect={handleSynonymPredictionSelect}
+            size="sm"
+          />
+          <TextInput
+            bind:value={synonymUpdatedName}
+            label={t('settings.species.synonyms.updatedName')}
+            disabled={store.isLoading || store.isSaving}
+            oninput={() => {
+              synonymError = '';
+            }}
+          />
+          <button
+            type="button"
+            class="inline-flex items-center justify-center gap-2 h-8 px-3 text-xs font-medium rounded-lg bg-violet-500 text-white hover:bg-violet-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            onclick={addSynonym}
+            disabled={store.isLoading ||
+              store.isSaving ||
+              !synonymBirdnetName.trim() ||
+              !synonymUpdatedName.trim()}
+          >
+            <Plus class="size-3.5" />
+            {t('settings.species.synonyms.addButton')}
+          </button>
+        </div>
+
+        <!-- Validation error -->
+        {#if synonymError}
+          <p class="text-xs text-[var(--color-error)]" role="alert" aria-live="assertive">
+            {synonymError}
+          </p>
+        {/if}
+
+        <!-- Synonyms table -->
+        {#if synonymCount === 0}
+          <p class="text-sm text-muted py-6 text-center">
+            {t('settings.species.synonyms.emptyState')}
+          </p>
+        {:else}
+          <div class="divide-y divide-[var(--border-100)]">
+            {#each Object.entries(synonyms) as [oldName, newName] (oldName)}
+              <div class="flex items-center justify-between py-2 px-1 group">
+                <div class="flex items-center gap-4 min-w-0 flex-1">
+                  <span class="text-sm font-mono truncate">{oldName}</span>
+                  <ChevronRight class="size-3.5 text-muted shrink-0" />
+                  <span class="text-sm font-mono truncate">{newName}</span>
+                </div>
+                <button
+                  type="button"
+                  class="p-1 rounded-md text-muted hover:text-[var(--color-error)] hover:bg-[var(--color-error)]/10 transition-colors opacity-0 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]"
+                  aria-label="{t('settings.species.remove')} {oldName}"
+                  onclick={() => removeSynonym(oldName)}
+                  disabled={store.isLoading || store.isSaving}
+                >
+                  <Trash2 class="size-3.5" />
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 {/snippet}

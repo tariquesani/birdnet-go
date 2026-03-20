@@ -193,10 +193,10 @@ func TestSetCustomSynonyms_IntegrationWithGetTaxonomySynonym(t *testing.T) {
 	// Add a custom synonym and verify it's visible via GetTaxonomySynonym.
 	SetCustomSynonyms(map[string]string{
 		"Testus oldus": "Testus newus",
-	})
+	}, nil)
 	t.Cleanup(func() {
 		// Restore to built-ins only.
-		SetCustomSynonyms(nil)
+		SetCustomSynonyms(nil, nil)
 	})
 
 	synonym, found := GetTaxonomySynonym("Testus oldus")
@@ -207,4 +207,58 @@ func TestSetCustomSynonyms_IntegrationWithGetTaxonomySynonym(t *testing.T) {
 	synonym, found = GetTaxonomySynonym("Accipiter cooperii")
 	assert.True(t, found)
 	assert.Equal(t, "Astur cooperii", synonym)
+}
+
+func TestSetCustomSynonyms_WarnsOnUnknownLabel(t *testing.T) {
+	// Not parallel: mutates package-level cache.
+
+	// Known labels in BirdNET format: "ScientificName_CommonName"
+	knownLabels := []string{
+		"Turdus merula_Common Blackbird",
+		"Accipiter cooperii_Cooper's Hawk",
+	}
+
+	// "Fakeus birdus" does not match any known label — should warn but still apply.
+	overrides := map[string]string{
+		"Fakeus birdus":      "Newus birdus",
+		"Accipiter cooperii": "Astur cooperii",
+	}
+
+	SetCustomSynonyms(overrides, knownLabels)
+	t.Cleanup(func() {
+		SetCustomSynonyms(nil, nil)
+	})
+
+	// Both overrides should still be applied despite the warning.
+	synonym, found := GetTaxonomySynonym("Fakeus birdus")
+	assert.True(t, found)
+	assert.Equal(t, "Newus birdus", synonym)
+
+	synonym, found = GetTaxonomySynonym("Accipiter cooperii")
+	assert.True(t, found)
+	assert.Equal(t, "Astur cooperii", synonym)
+}
+
+func TestSetCustomSynonyms_LogsOverrideSummary(t *testing.T) {
+	// Not parallel: mutates package-level cache.
+
+	overrides := map[string]string{
+		"Bubulcus ibis": "Ardea ibis",   // Replaces built-in
+		"Testus oldus":  "Testus newus", // New custom entry
+	}
+
+	// Should not panic or error — logging is best-effort.
+	SetCustomSynonyms(overrides, nil)
+	t.Cleanup(func() {
+		SetCustomSynonyms(nil, nil)
+	})
+
+	// Verify the overrides are applied correctly.
+	synonym, found := GetTaxonomySynonym("Bubulcus ibis")
+	assert.True(t, found)
+	assert.Equal(t, "Ardea ibis", synonym)
+
+	synonym, found = GetTaxonomySynonym("Testus oldus")
+	assert.True(t, found)
+	assert.Equal(t, "Testus newus", synonym)
 }
