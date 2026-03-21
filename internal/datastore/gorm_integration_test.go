@@ -541,3 +541,115 @@ func TestSearchNotesAdvanced_MinID_CursorVisitsAllRecords(t *testing.T) {
 	}
 	assert.Less(t, iterations, maxIterations, "should complete without hitting iteration safety limit")
 }
+
+// TestDataStore_Save_SetsNoteID verifies that DataStore.Save() correctly sets
+// the Note's ID field after GORM Create with a real SQLite database.
+// This is the foundation of the MQTT detection ID chain — if this fails,
+// all downstream ID propagation (DetectionRepository → DetectionContext → MQTT) breaks.
+//
+// Context: GitHub issue #2453 — MQTT detectionId is always 0.
+func TestDataStore_Save_SetsNoteID(t *testing.T) {
+	t.Parallel()
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&Note{}, &Results{}, &NoteReview{}, &NoteLock{}, &NoteComment{}))
+
+	ds := &DataStore{DB: db}
+
+	// Save 3 notes and verify each gets a sequential non-zero ID
+	for i := range 3 {
+		note := Note{
+			Date:           "2026-03-21",
+			Time:           fmt.Sprintf("10:%02d:00", i),
+			ScientificName: "Glaucidium passerinum",
+			CommonName:     "Eurasian Pygmy Owl",
+			Confidence:     0.98,
+		}
+		results := []Results{
+			{Species: "Parus major_Great Tit", Confidence: 0.85},
+		}
+
+		err := ds.Save(&note, results)
+		require.NoError(t, err, "Save note %d should succeed", i)
+
+		expectedID := uint(i + 1)
+		assert.Equal(t, expectedID, note.ID,
+			"Note %d: ID should be %d after Save, got %d", i, expectedID, note.ID)
+	}
+}
+
+// TestDetectionRepository_Save_PropagatesID verifies the full chain that
+// detectionRepository.Save() performs with a real SQLite database:
+//  1. NoteFromResult(result) — creates Note from domain Result
+//  2. DataStore.Save(&note, results) — GORM inserts and sets note.ID
+//  3. result.ID = note.ID — propagates the GORM-assigned ID back
+//
+// This tests each step individually against real GORM+SQLite to catch any
+// driver-level ID assignment issues. The Repo-path integration tests in
+// composite_action_integration_test.go exercise the full DetectionRepository
+// via NewDetectionRepository wrapping a mock datastore.
+//
+// Context: GitHub issue #2453 — MQTT detectionId is always 0.
+func TestDetectionRepository_Save_PropagatesID(t *testing.T) {
+	t.Parallel()
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&Note{}, &Results{}, &NoteReview{}, &NoteLock{}, &NoteComment{}))
+
+	ds := &DataStore{DB: db}
+
+	species := []struct {
+		common     string
+		scientific string
+	}{
+		{"Eurasian Pygmy Owl", "Glaucidium passerinum"},
+		{"Great Tit", "Parus major"},
+		{"Eurasian Blue Tit", "Cyanistes caeruleus"},
+	}
+
+	for i, s := range species {
+		now := time.Now()
+		result := &detection.Result{
+			Timestamp:  now,
+			SourceNode: "test-node",
+			AudioSource: detection.AudioSource{
+				ID:          "test-source",
+				SafeString:  "test-source",
+				DisplayName: "test-source",
+			},
+			BeginTime: now,
+			EndTime:   now.Add(15 * time.Second),
+			Species: detection.Species{
+				ScientificName: s.scientific,
+				CommonName:     s.common,
+			},
+			Confidence: 0.95,
+		}
+
+		// Step 1: NoteFromResult (same as detectionRepository.Save line 41)
+		note := NoteFromResult(result)
+		additionalResults := []detection.AdditionalResult{
+			{Species: detection.Species{ScientificName: s.scientific, CommonName: s.common}, Confidence: 0.85},
+		}
+		legacyResults := AdditionalResultsToDatastoreResults(additionalResults)
+
+		// Step 2: DataStore.Save — GORM Create sets note.ID
+		err := ds.Save(&note, legacyResults)
+		require.NoError(t, err, "Save detection %d (%s) should succeed", i, s.common)
+
+		// Step 3: Propagate ID back (same as detectionRepository.Save line 52)
+		result.ID = note.ID
+
+		expectedID := uint(i + 1)
+		assert.Equal(t, expectedID, note.ID,
+			"Detection %d: note.ID should be %d after GORM Create", i, expectedID)
+		assert.Equal(t, expectedID, result.ID,
+			"Detection %d: result.ID should be %d after propagation", i, expectedID)
+	}
+}
