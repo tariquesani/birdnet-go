@@ -6,8 +6,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/labstack/echo/v4"
 	"github.com/tphakala/birdnet-go/internal/logger"
+	"github.com/tphakala/birdnet-go/internal/restart"
+	"github.com/tphakala/birdnet-go/internal/sysinfo"
+	"github.com/tphakala/birdnet-go/internal/telemetry"
 )
 
 // ControlAction represents a control action request
@@ -26,9 +30,11 @@ type ControlResult struct {
 
 // Available control actions
 const (
-	ActionRestartAnalysis = "restart_analysis"
-	ActionReloadModel     = "reload_model"
-	ActionRebuildFilter   = "rebuild_filter"
+	ActionRestartAnalysis  = "restart_analysis"
+	ActionReloadModel      = "reload_model"
+	ActionRebuildFilter    = "rebuild_filter"
+	ActionRestartServer    = "restart_server"
+	ActionRestartContainer = "restart_container"
 )
 
 // Control channel signals
@@ -49,6 +55,8 @@ func (c *Controller) initControlRoutes() {
 	controlGroup.POST("/restart", c.RestartAnalysis)
 	controlGroup.POST("/reload", c.ReloadModel)
 	controlGroup.POST("/rebuild-filter", c.RebuildFilter)
+	controlGroup.POST("/restart-server", c.RestartServer)
+	controlGroup.POST("/restart-container", c.RestartContainer)
 	controlGroup.GET("/actions", c.GetAvailableActions)
 
 	c.logInfoIfEnabled("Control routes initialized successfully")
@@ -75,6 +83,17 @@ func (c *Controller) GetAvailableActions(ctx echo.Context) error {
 			Action:      ActionRebuildFilter,
 			Description: "Rebuild the species filter based on current location",
 		},
+		{
+			Action:      ActionRestartServer,
+			Description: "Restart the server binary",
+		},
+	}
+
+	if sysinfo.IsContainer() {
+		actions = append(actions, ControlAction{
+			Action:      ActionRestartContainer,
+			Description: "Restart the container",
+		})
 	}
 
 	c.logInfoIfEnabled("Retrieved available control actions successfully",
@@ -167,4 +186,80 @@ func (c *Controller) ReloadModel(ctx echo.Context) error {
 func (c *Controller) RebuildFilter(ctx echo.Context) error {
 	return c.handleControlSignal(ctx, SignalRebuildFilter, ActionRebuildFilter,
 		"Received request to rebuild species filter", "Filter rebuild signal sent")
+}
+
+// handleRestartRequest is the shared logic for restart endpoints.
+// It checks the shutdown requester, applies the CAS flag via setFlag,
+// and schedules an async shutdown after the HTTP response is sent.
+func (c *Controller) handleRestartRequest(ctx echo.Context, action string, setFlag func() bool, successMessage string) error {
+	sr := c.getShutdownRequester()
+	if sr == nil {
+		err := fmt.Errorf("shutdown requester not initialized")
+		return c.HandleError(ctx, err,
+			"Restart not available - server may not support programmatic restart",
+			http.StatusInternalServerError)
+	}
+
+	if !setFlag() {
+		return ctx.JSON(http.StatusConflict, ControlResult{
+			Success:   false,
+			Message:   "A restart is already in progress",
+			Action:    action,
+			Timestamp: time.Now(),
+		})
+	}
+
+	c.logInfoIfEnabled(successMessage,
+		logger.String("action", action),
+		logger.String("ip", ctx.RealIP()),
+	)
+
+	// Record restart event as Sentry breadcrumb for diagnostics
+	telemetry.AddBreadcrumb("restart", successMessage, sentry.LevelInfo, map[string]any{
+		"action": action,
+	})
+
+	// Schedule shutdown after response is sent (500ms to ensure HTTP flush).
+	// Capture sr locally so the goroutine uses a stable reference.
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		sr.RequestShutdown()
+	}()
+
+	return ctx.JSON(http.StatusOK, ControlResult{
+		Success:   true,
+		Message:   successMessage,
+		Action:    action,
+		Timestamp: time.Now(),
+	})
+}
+
+// RestartServer handles POST /api/v2/control/restart-server
+// Triggers a graceful binary restart.
+func (c *Controller) RestartServer(ctx echo.Context) error {
+	c.logInfoIfEnabled("Received request to restart server",
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
+
+	return c.handleRestartRequest(ctx, ActionRestartServer, restart.SetBinaryRestart, "Server restart initiated")
+}
+
+// RestartContainer handles POST /api/v2/control/restart-container
+// Triggers a container restart by exiting the process.
+func (c *Controller) RestartContainer(ctx echo.Context) error {
+	c.logInfoIfEnabled("Received request to restart container",
+		logger.String("path", ctx.Request().URL.Path),
+		logger.String("ip", ctx.RealIP()),
+	)
+
+	// Check if running in a container
+	if !sysinfo.IsContainer() {
+		envType, _ := sysinfo.GetEnvironment()
+		return c.HandleError(ctx, fmt.Errorf("not running in a container (environment: %s)", envType),
+			"Container restart is only available when running inside a container",
+			http.StatusBadRequest)
+	}
+
+	return c.handleRestartRequest(ctx, ActionRestartContainer, restart.SetContainerRestart, "Container restart initiated")
 }

@@ -376,7 +376,9 @@
         "criticalSystem": "Kriittinen järjestelmävirhe",
         "application": "Sovellusvirhe",
         "imageProvider": "Kuvantarjoajan ilmoitus",
-        "categoryError": "{category}-virhe"
+        "categoryError": "{category}-virhe",
+        "burstTitle": "Multiple {component} errors",
+        "burstMessage": "{count} errors in the last {window_minutes} minutes: {sample_error}"
       },
       "settings": {
         "reloadingBirdnet": "Otetaan uusia analyysiasetuksia käyttöön...",
@@ -893,6 +895,19 @@
         "species": "Laji"
       }
     },
+    "synonyms": {
+      "tabLabel": "Taksonomiasynonyymit",
+      "description": "Ohita tieteellisten nimien yhdistämiset lintukuvahaussa. BirdNET käyttää 2021E-taksonomiaa, mutta kuvalähteet voivat käyttää päivitettyjä nimiä. Sisäänrakennetut yhdistämiset ladataan aina; omat ohituksesi lisäävät tai korvaavat niitä.",
+      "birdnetName": "BirdNET-nimi",
+      "updatedName": "Päivitetty nimi",
+      "addButton": "Lisää synonyymi",
+      "emptyState": "Ei mukautettuja taksonomiasynonyymejä määritetty.",
+      "errors": {
+        "unknownSpecies": "Lajia ei löydy BirdNET-tunnisteista",
+        "duplicateKey": "Synonyymi tälle lajille on jo olemassa",
+        "emptyUpdatedName": "Päivitetty nimi on pakollinen"
+      }
+    },
     "tracking": {
       "title": "Lajiseuranta",
       "newSpecies": "Uusi laji",
@@ -935,6 +950,9 @@
       "inferno": "Inferno",
       "viridis": "Viridis",
       "grayscale": "Grayscale"
+    },
+    "labels": {
+      "toggle": "Näytä/piilota tunnistusmerkinnät"
     }
   },
   "system": {
@@ -3143,6 +3161,19 @@
           "description": "Napsauta \"Lisää määritys\" mukauttaaksesi lajintunnistusasetuksia."
         }
       },
+      "synonyms": {
+        "tabLabel": "Synonyymit",
+        "description": "Yhdistä BirdNET-lajinimet haluamiisi nimiin. Kun havainto vastaa synonyymia, käytetään päivitettyä nimeä.",
+        "birdnetName": "BirdNET-nimi",
+        "updatedName": "Päivitetty nimi",
+        "addButton": "Lisää synonyymi",
+        "emptyState": "Ei määritettyjä taksonomiasynonyymejä",
+        "errors": {
+          "unknownSpecies": "Lajia ei löydy BirdNET-tunnisteista",
+          "duplicateKey": "Tälle lajille on jo olemassa synonyymi",
+          "emptyUpdatedName": "Päivitetty nimi on pakollinen"
+        }
+      },
       "actionsModal": {
         "title": "Toiminnot lajille {species}",
         "actionType": {
@@ -4355,5 +4386,17 @@
         "acknowledge": "I understand"
       }
     }
+  },
+  "restart": {
+    "applicationRestart": "Käynnistä sovellus uudelleen",
+    "containerRestart": "Käynnistä kontti uudelleen",
+    "confirmTitle": "Vahvista uudelleenkäynnistys",
+    "confirmApplicationMessage": "Palvelin käynnistetään uudelleen. Yhteys katkeaa väliaikaisesti.",
+    "confirmContainerMessage": "Kontti käynnistetään uudelleen. Yhteys katkeaa väliaikaisesti.",
+    "inProgress": "Käynnistetään uudelleen...",
+    "bannerTitle": "Uudelleenkäynnistys vaaditaan",
+    "bannerMessage": "Asetusten muutokset vaativat uudelleenkäynnistyksen:",
+    "bannerAction": "Käynnistä uudelleen nyt",
+    "restartFailed": "Uudelleenkäynnistyksen aloittaminen epäonnistui"
   }
 }

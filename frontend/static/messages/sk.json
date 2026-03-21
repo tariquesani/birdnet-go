@@ -376,7 +376,9 @@
         "criticalSystem": "Kritická systémová chyba",
         "application": "Chyba aplikácie",
         "imageProvider": "Oznámenie poskytovateľa obrázkov",
-        "categoryError": "Chyba {category}"
+        "categoryError": "Chyba {category}",
+        "burstTitle": "Multiple {component} errors",
+        "burstMessage": "{count} errors in the last {window_minutes} minutes: {sample_error}"
       },
       "settings": {
         "reloadingBirdnet": "Aplikovanie nových nastavení analýzy...",
@@ -888,6 +890,19 @@
         "species": "Druh"
       }
     },
+    "synonyms": {
+      "tabLabel": "Taxonomické synonymá",
+      "description": "Prepísať priradenie vedeckých názvov používaných na vyhľadávanie obrázkov vtákov. BirdNET používa taxonómiu 2021E, ale zdroje obrázkov môžu používať aktualizované názvy. Vstavané priradenia sa vždy načítajú; vaše prepísania ich dopĺňajú alebo nahrádzajú.",
+      "birdnetName": "Názov BirdNET",
+      "updatedName": "Aktualizovaný názov",
+      "addButton": "Pridať synonymum",
+      "emptyState": "Žiadne vlastné taxonomické synonymá nie sú nakonfigurované.",
+      "errors": {
+        "unknownSpecies": "Druh sa nenašiel v štítkoch BirdNET",
+        "duplicateKey": "Synonymum pre tento druh už existuje",
+        "emptyUpdatedName": "Aktualizovaný názov je povinný"
+      }
+    },
     "tracking": {
       "title": "Sledovanie druhov",
       "newSpecies": "Nový druh",
@@ -930,6 +945,9 @@
       "inferno": "Inferno",
       "viridis": "Viridis",
       "grayscale": "Grayscale"
+    },
+    "labels": {
+      "toggle": "Prepnúť štítky detekcie"
     }
   },
   "system": {
@@ -3209,6 +3227,19 @@
           "description": "Kliknite na \"Pridať konfiguráciu\" pre prispôsobenie nastavení detekcie druhov."
         }
       },
+      "synonyms": {
+        "tabLabel": "Synonymá",
+        "description": "Priraďte názvy druhov BirdNET k vašim preferovaným názvom. Keď detekcia zodpovedá synonymu, použije sa aktualizovaný názov.",
+        "birdnetName": "Názov BirdNET",
+        "updatedName": "Aktualizovaný názov",
+        "addButton": "Pridať synonymum",
+        "emptyState": "Žiadne taxonomické synonymá nie sú nakonfigurované",
+        "errors": {
+          "unknownSpecies": "Druh sa nenašiel v štítkoch BirdNET",
+          "duplicateKey": "Pre tento druh už existuje synonymum",
+          "emptyUpdatedName": "Aktualizovaný názov je povinný"
+        }
+      },
       "actionsModal": {
         "title": "Akcie pre {species}",
         "actionType": {
@@ -4186,5 +4217,17 @@
         "acknowledge": "I understand"
       }
     }
+  },
+  "restart": {
+    "applicationRestart": "Reštartovať aplikáciu",
+    "containerRestart": "Reštartovať kontajner",
+    "confirmTitle": "Potvrdiť reštart",
+    "confirmApplicationMessage": "Server sa reštartuje. Budete dočasne odpojený.",
+    "confirmContainerMessage": "Kontajner sa reštartuje. Budete dočasne odpojený.",
+    "inProgress": "Reštartuje sa...",
+    "bannerTitle": "Vyžaduje sa reštart",
+    "bannerMessage": "Zmeny konfigurácie vyžadujú reštart:",
+    "bannerAction": "Reštartovať teraz",
+    "restartFailed": "Nepodarilo sa spustiť reštart"
   }
 }

@@ -25,6 +25,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/conf"
@@ -109,6 +111,15 @@ func parseDetectionTimestamp(date, timeStr string, tz *time.Location) int64 {
 	return time.Now().Unix()
 }
 
+// nameMaps holds the species name lookup maps. Stored behind an atomic.Pointer
+// so readers are lock-free and UpdateNameMaps can swap atomically.
+type nameMaps struct {
+	// common maps scientific name → common name (display lookup).
+	common map[string]string
+	// species maps lowercase common name → scientific name (reverse lookup).
+	species map[string]string
+}
+
 // Datastore implements datastore.Interface using only v2 repositories.
 type Datastore struct {
 	manager      v2.Manager
@@ -130,19 +141,17 @@ type Datastore struct {
 	speciesLabelTypeID uint  // "species" label type ID
 	avesClassID        *uint // "Aves" taxonomic class ID (optional)
 
-	// speciesMap provides O(1) lookup from common name (lowercase) to scientific name.
-	// Used by GetThresholdEvents to query both old (common name) and new (scientific name)
-	// labels when retrieving threshold events. See issue #1907.
-	// TODO: Remove this workaround when legacy database support is dropped.
-	speciesMap map[string]string
-
-	// commonNameMap provides O(1) lookup from scientific name to common name.
-	// Used for display purposes in analytics and summary endpoints.
-	commonNameMap map[string]string
+	// names holds the species name lookup maps behind an atomic.Pointer
+	// for lock-free reads and atomic swaps when locale changes.
+	names atomic.Pointer[nameMaps]
 
 	// speciesCodeMap provides O(1) lookup from scientific name to eBird species code.
 	// Populated from the eBird taxonomy data passed via Config.SpeciesCodeMap.
 	speciesCodeMap map[string]string
+
+	// loggedMissingNames tracks scientific names already warned about for
+	// missing common name mappings, preventing log spam.
+	loggedMissingNames sync.Map
 
 	// dbstatAvailable caches whether the dbstat virtual table exists.
 	// 0 = unchecked, 1 = available, -1 = not available.
@@ -247,20 +256,7 @@ func New(cfg *Config) (*Datastore, error) {
 	}
 
 	// Build species name maps from labels.
-	// Labels are in "ScientificName_CommonName" format.
-	// See issue #1907 for context on speciesMap usage.
-	speciesMap := make(map[string]string)
-	commonNameMap := make(map[string]string)
-	for _, label := range cfg.Labels {
-		if scientificName, commonName, found := strings.Cut(label, "_"); found {
-			scientificName = strings.TrimSpace(scientificName)
-			commonName = strings.TrimSpace(commonName)
-			if commonName != "" && scientificName != "" {
-				speciesMap[strings.ToLower(commonName)] = scientificName
-				commonNameMap[scientificName] = commonName
-			}
-		}
-	}
+	nm := buildNameMaps(cfg.Labels)
 
 	// Use species code map from taxonomy data (injected via config).
 	speciesCodeMap := cfg.SpeciesCodeMap
@@ -268,7 +264,7 @@ func New(cfg *Config) (*Datastore, error) {
 		speciesCodeMap = make(map[string]string)
 	}
 
-	return &Datastore{
+	ds := &Datastore{
 		manager:            cfg.Manager,
 		detection:          cfg.Detection,
 		label:              cfg.Label,
@@ -284,16 +280,55 @@ func New(cfg *Config) (*Datastore, error) {
 		defaultModelID:     defaultModelID,
 		speciesLabelTypeID: speciesLabelTypeID,
 		avesClassID:        avesClassID,
-		speciesMap:         speciesMap,
-		commonNameMap:      commonNameMap,
 		speciesCodeMap:     speciesCodeMap,
 		dbCounters:         dbCounters,
-	}, nil
+	}
+	ds.names.Store(nm)
+	return ds, nil
+}
+
+// buildNameMaps parses BirdNET labels ("ScientificName_CommonName" format)
+// into lookup maps for common name resolution.
+// See issue #1907 for context on species map usage.
+func buildNameMaps(labels []string) *nameMaps {
+	speciesMap := make(map[string]string, len(labels))
+	commonMap := make(map[string]string, len(labels))
+	for _, label := range labels {
+		if scientificName, commonName, found := strings.Cut(label, "_"); found {
+			scientificName = strings.TrimSpace(scientificName)
+			commonName = strings.TrimSpace(commonName)
+			if commonName != "" && scientificName != "" {
+				speciesMap[strings.ToLower(commonName)] = scientificName
+				commonMap[scientificName] = commonName
+			}
+		}
+	}
+	return &nameMaps{common: commonMap, species: speciesMap}
+}
+
+// UpdateNameMaps rebuilds species name lookup maps from updated BirdNET labels.
+// Called after locale or model changes to keep common name resolution current.
+// The new maps are built first, then atomically swapped in — readers are never blocked.
+// Also resets the missing-name warning deduplication so new mismatches are logged.
+func (ds *Datastore) UpdateNameMaps(labels []string) {
+	ds.names.Store(buildNameMaps(labels))
+	ds.loggedMissingNames.Clear()
 }
 
 // Open is a no-op since the manager is already open.
 func (ds *Datastore) Open() error {
 	return nil
+}
+
+// loadNameMaps returns the current name maps. Always returns a non-nil value.
+func (ds *Datastore) loadNameMaps() *nameMaps {
+	if m := ds.names.Load(); m != nil {
+		return m
+	}
+	return &nameMaps{
+		common:  make(map[string]string),
+		species: make(map[string]string),
+	}
 }
 
 // GetDBCounters returns the atomic counters for database query latency tracking.
@@ -584,7 +619,7 @@ func (ds *Datastore) Get(id string) (datastore.Note, error) {
 }
 
 // detectionToNote converts a v2 Detection to a legacy Note.
-// Common name is looked up from ds.commonNameMap which is built at startup.
+// Common name is looked up from the name maps which are built at startup.
 func (ds *Datastore) detectionToNote(det *entities.Detection) datastore.Note {
 	// Guard against nil detection to prevent panics
 	if det == nil {
@@ -606,10 +641,7 @@ func (ds *Datastore) detectionToNote(det *entities.Detection) datastore.Note {
 	}
 
 	// Look up common name from pre-built map, fallback to scientific name
-	commonName := scientificName
-	if cn, ok := ds.commonNameMap[scientificName]; ok {
-		commonName = cn
-	}
+	commonName := ds.resolveCommonName(scientificName)
 
 	clipName := ""
 	if det.ClipName != nil {
@@ -731,10 +763,7 @@ func (ds *Datastore) detectionToRecord(det *entities.Detection) datastore.Detect
 	}
 
 	// Look up common name from pre-built map, fallback to scientific name
-	commonName := scientificName
-	if cn, ok := ds.commonNameMap[scientificName]; ok {
-		commonName = cn
-	}
+	commonName := ds.resolveCommonName(scientificName)
 
 	// Timestamp conversion
 	timestamp := time.Unix(det.DetectedAt, 0).In(ds.timezone)
@@ -953,10 +982,7 @@ func (ds *Datastore) GetTopBirdsData(selectedDate string, minConfidenceNormalize
 		sciName := extractScientificName(r.ScientificName)
 
 		// Look up common name from the cached map
-		commonName := sciName
-		if cn, ok := ds.commonNameMap[sciName]; ok {
-			commonName = cn
-		}
+		commonName := ds.resolveCommonName(sciName)
 
 		note := datastore.Note{
 			ScientificName: sciName,
@@ -982,7 +1008,7 @@ func (ds *Datastore) GetHourlyOccurrences(date, commonName string, minConfidence
 	// Normalize common name to scientific name using speciesMap
 	speciesName := commonName
 	normalized := strings.ToLower(strings.TrimSpace(commonName))
-	if sci, ok := ds.speciesMap[normalized]; ok {
+	if sci, ok := ds.loadNameMaps().species[normalized]; ok {
 		speciesName = sci
 	}
 
@@ -1031,7 +1057,7 @@ func (ds *Datastore) GetBatchHourlyOccurrences(date string, species []string, mi
 	for _, commonName := range species {
 		normalized := strings.ToLower(strings.TrimSpace(commonName))
 		scientificName := commonName
-		if sci, ok := ds.speciesMap[normalized]; ok {
+		if sci, ok := ds.loadNameMaps().species[normalized]; ok {
 			scientificName = sci
 		}
 
@@ -2152,10 +2178,7 @@ func (ds *Datastore) GetSpeciesSummaryData(ctx context.Context, startDate, endDa
 		sciName := extractScientificName(d.ScientificName)
 
 		// Look up common name from pre-built map, fallback to scientific name
-		commonName := sciName
-		if cn, ok := ds.commonNameMap[sciName]; ok {
-			commonName = cn
-		}
+		commonName := ds.resolveCommonName(sciName)
 
 		result = append(result, datastore.SpeciesSummaryData{
 			ScientificName: sciName,
@@ -2319,10 +2342,7 @@ func (ds *Datastore) convertToNewSpeciesData(_ context.Context, data []speciesFi
 		sciName := extractScientificName(d.ScientificName)
 
 		// Look up common name from pre-built map, fallback to scientific name
-		commonName := sciName
-		if cn, ok := ds.commonNameMap[sciName]; ok {
-			commonName = cn
-		}
+		commonName := ds.resolveCommonName(sciName)
 
 		firstSeenDate := time.Unix(d.FirstDetected, 0).In(ds.timezone).Format(time.DateOnly)
 		result = append(result, datastore.NewSpeciesData{
@@ -2458,25 +2478,36 @@ func thresholdScientificName(t *entities.DynamicThreshold) string {
 }
 
 // resolveCommonName maps a scientific name to its common name using the
-// pre-built commonNameMap. Falls back to the scientific name if no mapping exists.
+// pre-built name maps. Falls back to the scientific name if no mapping exists.
 // Handles legacy concatenated "ScientificName_CommonName" format by extracting
 // only the scientific name portion before lookup.
+// Logs a warning (once per species) when the fallback is used and maps are populated,
+// to help diagnose issues where common names stop appearing.
 func (ds *Datastore) resolveCommonName(scientificName string) string {
 	sciName := extractScientificName(scientificName)
-	if cn, ok := ds.commonNameMap[sciName]; ok {
+	nm := ds.loadNameMaps()
+	if cn, ok := nm.common[sciName]; ok {
 		return cn
+	}
+	// Log once per missing species when maps are populated (not during startup with empty maps)
+	if len(nm.common) > 0 {
+		if _, alreadyLogged := ds.loggedMissingNames.LoadOrStore(sciName, struct{}{}); !alreadyLogged {
+			ds.log.Warn("common name not found in name maps, falling back to scientific name",
+				logger.String("scientific_name", sciName),
+				logger.Int("name_map_size", len(nm.common)))
+		}
 	}
 	return sciName
 }
 
 // resolveToScientificName converts a species name (which may be a common name
 // or scientific name) to a scientific name for v2 label lookups.
-// Uses the pre-built speciesMap (lowercase common name → scientific name).
+// Uses the pre-built species name map (lowercase common name → scientific name).
 // Falls back to the input unchanged if no mapping is found.
 // This follows the same pattern used in GetHourlyOccurrences.
 func (ds *Datastore) resolveToScientificName(name string) string {
 	normalized := strings.ToLower(strings.TrimSpace(name))
-	if sci, ok := ds.speciesMap[normalized]; ok {
+	if sci, ok := ds.loadNameMaps().species[normalized]; ok {
 		return sci
 	}
 	return name
@@ -2740,7 +2771,7 @@ func (ds *Datastore) GetThresholdEvents(speciesName string, limit int) ([]datast
 	// Query 2: If we can resolve to scientific name, also query with that
 	// This finds correctly saved events (after #1907 fix)
 	normalizedCommon := strings.ToLower(strings.TrimSpace(speciesName))
-	if scientificName, ok := ds.speciesMap[normalizedCommon]; ok && scientificName != speciesName {
+	if scientificName, ok := ds.loadNameMaps().species[normalizedCommon]; ok && scientificName != speciesName {
 		sciEvents, err := ds.threshold.GetThresholdEvents(ctx, scientificName, limit)
 		if err == nil && len(sciEvents) > 0 {
 			v2Events = append(v2Events, sciEvents...)

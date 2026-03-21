@@ -72,7 +72,7 @@ test.describe('Console Error Regression Tests', () => {
         await page.goto(route);
         await page.waitForLoadState('domcontentloaded');
         // Give async effects and SSE connections time to settle
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(500);
       });
 
       expect(errors, `Unexpected errors on initial load of ${route}`).toEqual([]);
@@ -83,14 +83,14 @@ test.describe('Console Error Regression Tests', () => {
       await page.goto(route);
       await page.waitForLoadState('domcontentloaded');
       // Wait for the page to fully initialize (SSE, effects, etc.)
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(500);
 
       // Now capture errors during reload
       const errors = await collectErrorsDuring(page, async () => {
         await page.reload();
         await page.waitForLoadState('domcontentloaded');
         // Wait for re-initialization after reload
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(500);
       });
 
       expect(errors, `Unexpected errors after reloading ${route}`).toEqual([]);
@@ -104,14 +104,14 @@ test.describe('Console Error Regression Tests', () => {
   test('dashboard: no console errors across multiple rapid reloads', async ({ page }) => {
     await page.goto('/ui/dashboard');
     await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(500);
 
     const errors = await collectErrorsDuring(page, async () => {
       // Rapid reload cycle — stresses cleanup/teardown paths
       for (let i = 0; i < 3; i++) {
         await page.reload();
         await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(500);
       }
     });
 
@@ -126,18 +126,18 @@ test.describe('Console Error Regression Tests', () => {
     // Load dashboard
     await page.goto('/ui/dashboard');
     await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(500);
 
     const errors = await collectErrorsDuring(page, async () => {
       // Navigate away to settings
       await page.goto('/ui/settings');
       await page.waitForLoadState('domcontentloaded');
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(500);
 
       // Navigate back to dashboard
       await page.goto('/ui/dashboard');
       await page.waitForLoadState('domcontentloaded');
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(500);
     });
 
     expect(errors, 'Unexpected errors during navigate-away-and-back').toEqual([]);

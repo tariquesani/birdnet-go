@@ -17,6 +17,7 @@ import (
 	"github.com/tphakala/birdnet-go/internal/analysis/processor"
 	"github.com/tphakala/birdnet-go/internal/api"
 	apiv2 "github.com/tphakala/birdnet-go/internal/api/v2"
+	"github.com/tphakala/birdnet-go/internal/app"
 	"github.com/tphakala/birdnet-go/internal/backup"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/conf"
@@ -175,10 +176,15 @@ func realtimeAnalysisInternal(settings *conf.Settings, quitChan chan struct{}) e
 	// Print system details and configuration
 	printSystemDetails(settings)
 
+	// Check for unmigrated legacy records from a potential hard crash during tail sync.
+	// Must run BEFORE consolidation to prevent renaming the legacy DB while it still
+	// has unmigrated records that the worker needs to sync.
+	datastoreLog := logger.Global().Module("datastore")
+	hasUnmigrated := datastoreV2.HasUnmigratedLegacyRecords(settings, datastoreLog)
+
 	// Check for and perform database consolidation if needed (SQLite only)
-	// This moves the v2 database from migration path to configured path after migration completes
-	if settings.Output.SQLite.Enabled {
-		datastoreLog := logger.Global().Module("datastore")
+	// Skip consolidation when unmigrated records found — let the worker tail-sync them first
+	if settings.Output.SQLite.Enabled && !hasUnmigrated {
 		consolidated, err := datastoreV2.CheckAndConsolidateAtStartup(settings.Output.SQLite.Path, datastoreLog)
 		if err != nil {
 			datastoreLog.Error("database consolidation failed", logger.Error(err))
@@ -186,6 +192,8 @@ func realtimeAnalysisInternal(settings *conf.Settings, quitChan chan struct{}) e
 		} else if consolidated {
 			datastoreLog.Info("database consolidation completed, continuing startup")
 		}
+	} else if hasUnmigrated {
+		datastoreLog.Info("deferring database consolidation until unmigrated records are synced")
 	}
 
 	// Check migration state before initializing database
@@ -194,8 +202,17 @@ func realtimeAnalysisInternal(settings *conf.Settings, quitChan chan struct{}) e
 	v2OnlyMode := startupState.MigrationStatus == entities.MigrationStatusCompleted && startupState.V2Available
 	freshInstall := startupState.FreshInstall
 
-	// Log startup mode detection - use datastore module for database mode messages
-	datastoreLog := logger.Global().Module("datastore")
+	// Override v2-only mode when unmigrated legacy records were found. This forces
+	// the system to start with the legacy DB so the worker can tail-sync the stragglers.
+	// Consolidation will complete on the next clean restart.
+	if hasUnmigrated && v2OnlyMode {
+		datastoreLog.Warn("deferring v2-only mode: unmigrated legacy records found, will sync via tail sync",
+			logger.String("operation", "startup_reconciliation"))
+		v2OnlyMode = false
+		startupState.LegacyRequired = true
+	}
+
+	// Log startup mode detection
 	switch {
 	case v2OnlyMode:
 		datastoreLog.Info("migration completed, starting in enhanced database mode",
@@ -514,6 +531,11 @@ func realtimeAnalysisInternal(settings *conf.Settings, quitChan chan struct{}) e
 	// Unlike other services that start directly here, telemetry is managed by the control monitor
 	// to allow users to dynamically enable/disable metrics and change the listen address without
 	// restarting the application. The control monitor will start the endpoint if enabled.
+
+	// Wire app shutdown requester into API controller for restart endpoints
+	if appInstance := app.GetGlobal(); appInstance != nil {
+		apiServer.APIController().SetShutdownRequester(appInstance)
+	}
 
 	// start control monitor for hot reloads
 	ctrlMonitor := startControlMonitor(&wg, controlChan, quitChan, restartChan, bufferManager, proc, apiServer.APIController(), metrics, quietHoursScheduler)
@@ -1984,9 +2006,12 @@ func setupMigrationWorker(cfg *migrationSetupConfig) error {
 			logger.Int64("total_records", state.TotalRecords),
 			logger.String("operation", cfg.opName))
 
-		// Resume worker if migration was in progress
+		// Resume worker if migration was in progress, or if migration completed
+		// but we're running in legacy mode due to unmigrated records from a crash.
+		// In the COMPLETED case, the worker enters tail sync to drain stragglers.
 		if state.State == entities.MigrationStatusDualWrite ||
-			state.State == entities.MigrationStatusMigrating {
+			state.State == entities.MigrationStatusMigrating ||
+			state.State == entities.MigrationStatusCompleted {
 			migrationLogger.Info("resuming migration worker after restart",
 				logger.String("state", string(state.State)),
 				logger.String("operation", cfg.opName))

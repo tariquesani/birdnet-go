@@ -50,8 +50,7 @@ setup('Setup test environment and wait for server readiness', async ({ request, 
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
 
     // Check if we can access the new UI
-    const hasMainContent =
-      (await page.locator('[data-testid="main-content"], main, [role="main"], body').count()) > 0;
+    const hasMainContent = (await page.locator('main, body').count()) > 0;
     if (hasMainContent) {
       uiReady = true;
       // eslint-disable-next-line no-console -- Test setup debugging

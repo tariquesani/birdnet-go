@@ -3,7 +3,10 @@ package alerting
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -33,9 +36,17 @@ type Engine struct {
 	log            logger.Logger
 	telemetry      *AlertingTelemetry // nil-safe engine health reporter
 
-	// Cooldown tracking (in-memory, resets on restart)
-	cooldowns   map[uint]time.Time // rule ID → last fired time
+	// Cooldown tracking (in-memory, resets on restart).
+	// Key is rule ID for event rules, or "ruleID|metricKey" for metric
+	// rules so that per-instance metrics (e.g., disk paths) have
+	// independent cooldowns.
+	cooldowns   map[string]time.Time
 	cooldownsMu sync.RWMutex
+
+	// Escalation tracking: maps "ruleID|metricKey" → last fired step value.
+	// Prevents re-fire until metric crosses the next higher step.
+	escalations   map[string]float64
+	escalationsMu sync.RWMutex
 
 	// Cached rules (refreshed periodically)
 	rules   []entities.AlertRule
@@ -53,7 +64,8 @@ func NewEngine(repo repository.AlertRuleRepository, actionFunc ActionFunc, log l
 		actionFunc:    actionFunc,
 		log:           log,
 		telemetry:     at,
-		cooldowns:     make(map[uint]time.Time),
+		cooldowns:     make(map[string]time.Time),
+		escalations:   make(map[string]float64),
 	}
 }
 
@@ -86,6 +98,117 @@ func metricBufferKey(metricName string, properties map[string]any) string {
 	return metricName
 }
 
+// cooldownKey builds the cooldown state key. For metric rules, it includes
+// the metric instance (path) so per-instance metrics have independent cooldowns.
+// For event rules, it uses only the rule ID.
+func cooldownKey(rule *entities.AlertRule, event *AlertEvent) string {
+	if rule.TriggerType == TriggerTypeMetric {
+		return fmt.Sprintf("%d|%s", rule.ID, metricBufferKey(rule.MetricName, event.Properties))
+	}
+	return fmt.Sprintf("%d", rule.ID)
+}
+
+// escalationKey builds the escalation state key from the rule ID and metric
+// instance (path). Multiple mount points are tracked independently.
+func escalationKey(ruleID uint, metricName string, properties map[string]any) string {
+	return fmt.Sprintf("%d|%s", ruleID, metricBufferKey(metricName, properties))
+}
+
+// clearEscalationIfRecovered clears escalation state for rules whose metric
+// has dropped below the base threshold (lowest EscalationStep). This must run
+// for every metric event, even when ruleMatches returns false, because a
+// metric below threshold causes ruleMatches to return false — which would
+// leave stale escalation state that suppresses future alerts.
+func (e *Engine) clearEscalationIfRecovered(rules []entities.AlertRule, event *AlertEvent) {
+	if event.MetricName == "" {
+		return
+	}
+	val, ok := event.Properties[PropertyValue]
+	if !ok {
+		return
+	}
+	floatVal, err := toFloat64(val)
+	if err != nil {
+		return
+	}
+
+	for i := range rules {
+		rule := &rules[i]
+		if rule.TriggerType != TriggerTypeMetric || rule.MetricName != event.MetricName {
+			continue
+		}
+		if rule.ObjectType != event.ObjectType {
+			continue
+		}
+		if len(rule.EscalationSteps) == 0 {
+			continue
+		}
+		// Find the lowest step (base threshold) — steps may not be sorted.
+		baseStep := slices.Min(rule.EscalationSteps)
+		if floatVal < baseStep {
+			key := escalationKey(rule.ID, event.MetricName, event.Properties)
+			e.escalationsMu.Lock()
+			delete(e.escalations, key)
+			e.escalationsMu.Unlock()
+		}
+	}
+}
+
+// shouldSuppressEscalation checks if a metric rule should be suppressed
+// because the metric hasn't crossed a new escalation step. Returns true
+// if the rule should NOT fire. When it returns false (allow fire), it also
+// returns a shallow copy of properties with PropertyThresholdStep set.
+func (e *Engine) shouldSuppressEscalation(rule *entities.AlertRule, event *AlertEvent) (suppress bool, props map[string]any) {
+	if len(rule.EscalationSteps) == 0 {
+		return false, event.Properties
+	}
+
+	val, ok := event.Properties[PropertyValue]
+	if !ok {
+		return false, event.Properties
+	}
+	floatVal, err := toFloat64(val)
+	if err != nil {
+		return false, event.Properties
+	}
+
+	// Find the highest step the current value exceeds.
+	// Uses explicit max tracking so the result is correct even if
+	// EscalationSteps is not sorted ascending. A boolean flag avoids
+	// issues with negative step values (e.g., temperature thresholds).
+	var currentStep float64
+	stepFound := false
+	for _, step := range rule.EscalationSteps {
+		if floatVal >= step && (!stepFound || step > currentStep) {
+			currentStep = step
+			stepFound = true
+		}
+	}
+	if !stepFound {
+		return true, nil
+	}
+
+	key := escalationKey(rule.ID, event.MetricName, event.Properties)
+
+	// Single write lock for atomic check-and-update to avoid TOCTOU race
+	// where two goroutines both pass the read check and both fire.
+	e.escalationsMu.Lock()
+	lastStep, exists := e.escalations[key]
+	if exists && lastStep >= currentStep {
+		e.escalationsMu.Unlock()
+		return true, nil
+	}
+	e.escalations[key] = currentStep
+	e.escalationsMu.Unlock()
+
+	// Shallow-copy properties and add the threshold step (don't mutate shared map).
+	propsCopy := make(map[string]any, len(event.Properties)+1)
+	maps.Copy(propsCopy, event.Properties)
+	propsCopy[PropertyThresholdStep] = currentStep
+
+	return false, propsCopy
+}
+
 // HandleEvent evaluates an event against all enabled rules.
 func (e *Engine) HandleEvent(event *AlertEvent) {
 	// Record metric sample once before rule iteration to avoid duplicates
@@ -104,10 +227,31 @@ func (e *Engine) HandleEvent(event *AlertEvent) {
 	copy(rules, e.rules)
 	e.rulesMu.RUnlock()
 
+	// Phase 1: Clear escalation state for metrics that have recovered.
+	e.clearEscalationIfRecovered(rules, event)
+
+	// Phase 2: Evaluate rules.
 	for i := range rules {
 		rule := &rules[i]
-		if e.ruleMatches(rule, event) && !e.isInCooldown(rule.ID, rule.CooldownSec) {
-			e.fireRule(rule, event)
+		cdKey := cooldownKey(rule, event)
+		if e.ruleMatches(rule, event) && !e.isInCooldown(cdKey, rule.CooldownSec) {
+			// Check escalation suppression for metric rules with steps.
+			if rule.TriggerType == TriggerTypeMetric && len(rule.EscalationSteps) > 0 {
+				suppress, props := e.shouldSuppressEscalation(rule, event)
+				if suppress {
+					continue
+				}
+				augmentedEvent := &AlertEvent{
+					ObjectType: event.ObjectType,
+					EventName:  event.EventName,
+					MetricName: event.MetricName,
+					Properties: props,
+					Timestamp:  event.Timestamp,
+				}
+				e.fireRule(rule, augmentedEvent, cdKey)
+				continue
+			}
+			e.fireRule(rule, event, cdKey)
 		}
 	}
 }
@@ -160,12 +304,12 @@ func (e *Engine) evaluateMetricConditions(rule *entities.AlertRule, event *Alert
 	return true
 }
 
-func (e *Engine) isInCooldown(ruleID uint, cooldownSec int) bool {
+func (e *Engine) isInCooldown(key string, cooldownSec int) bool {
 	if cooldownSec <= 0 {
 		return false
 	}
 	e.cooldownsMu.RLock()
-	lastFired, exists := e.cooldowns[ruleID]
+	lastFired, exists := e.cooldowns[key]
 	e.cooldownsMu.RUnlock()
 	if !exists {
 		return false
@@ -173,8 +317,8 @@ func (e *Engine) isInCooldown(ruleID uint, cooldownSec int) bool {
 	return time.Since(lastFired) < time.Duration(cooldownSec)*time.Second
 }
 
-func (e *Engine) fireRule(rule *entities.AlertRule, event *AlertEvent) {
-	e.fireRuleInternal(rule, event, e.actionFunc)
+func (e *Engine) fireRule(rule *entities.AlertRule, event *AlertEvent, cdKey string) {
+	e.fireRuleInternal(rule, event, e.actionFunc, cdKey)
 }
 
 // TestFireRule fires a rule's actions directly, bypassing condition evaluation
@@ -193,15 +337,17 @@ func (e *Engine) TestFireRule(rule *entities.AlertRule) {
 	if actionFn == nil {
 		actionFn = e.actionFunc
 	}
-	e.fireRuleInternal(rule, event, actionFn)
+	cdKey := cooldownKey(rule, event)
+	e.fireRuleInternal(rule, event, actionFn, cdKey)
 }
 
 // fireRuleInternal contains the shared logic for firing a rule: recording
 // cooldown, persisting history, and dispatching the provided action function.
-func (e *Engine) fireRuleInternal(rule *entities.AlertRule, event *AlertEvent, actionFn ActionFunc) {
-	// Record cooldown
+func (e *Engine) fireRuleInternal(rule *entities.AlertRule, event *AlertEvent, actionFn ActionFunc, cdKey string) {
+	// Record cooldown using the key from the caller (includes metric instance
+	// for per-path cooldowns on metric rules).
 	e.cooldownsMu.Lock()
-	e.cooldowns[rule.ID] = time.Now()
+	e.cooldowns[cdKey] = time.Now()
 	e.cooldownsMu.Unlock()
 
 	// Record history

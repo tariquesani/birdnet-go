@@ -95,8 +95,12 @@ func SetupIntegrationTest(t *testing.T) *TestContext {
 	// Create migration worker (uses auxiliary migrator)
 	ctx.createWorker(t)
 
-	// Register cleanup
+	// Register cleanup — stop worker before closing databases to prevent
+	// goroutine leaks from tail sync running after COMPLETED state.
 	t.Cleanup(func() {
+		if ctx.Worker != nil {
+			ctx.Worker.Stop()
+		}
 		if ctx.cleanup != nil {
 			ctx.cleanup()
 		}
@@ -789,6 +793,7 @@ func (s *testLegacyInterface) DeleteExpiredNotificationHistory(_ time.Time) (int
 	return 0, nil
 }
 func (s *testLegacyInterface) SchemaVersion() string                               { return datastore.SchemaVersionLegacy }
+func (s *testLegacyInterface) UpdateNameMaps(_ []string)                           {}
 func (s *testLegacyInterface) GetDatabaseStats() (*datastore.DatabaseStats, error) { return nil, nil } //nolint:nilnil // stub
 
 // Migration bulk fetch methods - query actual database for integration tests

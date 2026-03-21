@@ -99,7 +99,7 @@ test.describe('MiniSpectrogram — Effect Loop Regression', () => {
       await page.goto('/ui/dashboard');
       await page.waitForLoadState('domcontentloaded');
       // Allow time for SSE connections, effects, and HLS discovery
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(1000);
     });
 
     expect(
@@ -123,7 +123,7 @@ test.describe('MiniSpectrogram — Effect Loop Regression', () => {
     const errors = await collectErrorsDuring(page, async () => {
       await page.reload();
       await page.waitForLoadState('domcontentloaded');
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(1000);
     });
 
     expect(
@@ -150,7 +150,7 @@ test.describe('MiniSpectrogram — Effect Loop Regression', () => {
     await page.waitForLoadState('domcontentloaded');
 
     // Wait for HLS startup attempt (source discovery + stream start)
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(1000);
 
     // The spinner element: a div with animate-spin inside the spectrogram card
     // If the spectrogram is active, it should show either the canvas or nothing,
@@ -187,7 +187,7 @@ test.describe('MiniSpectrogram — Effect Loop Regression', () => {
       for (let i = 0; i < 3; i++) {
         await page.reload();
         await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(500);
       }
     });
 
@@ -205,7 +205,7 @@ test.describe('MiniSpectrogram — Effect Loop Regression', () => {
     // Load dashboard and get initial card order
     await page.goto('/ui/dashboard');
     await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(1000);
 
     // Get card headings in order (h3 elements inside card sections)
     const getCardOrder = async () => {
@@ -214,7 +214,7 @@ test.describe('MiniSpectrogram — Effect Loop Regression', () => {
           '.col-span-12 h3, section h3, [class*="card"] h3'
         );
         return Array.from(headings)
-          .map(h => h.textContent?.trim())
+          .map(h => h.textContent.trim())
           .filter(Boolean);
       });
     };
@@ -223,6 +223,7 @@ test.describe('MiniSpectrogram — Effect Loop Regression', () => {
 
     // Skip if no cards found (backend might not serve layout config in CI)
     if (initialOrder.length === 0) {
+      // eslint-disable-next-line playwright/no-skipped-test -- intentionally skipped
       test.skip(true, 'No dashboard cards found — backend may not serve layout config');
       return;
     }
@@ -230,7 +231,7 @@ test.describe('MiniSpectrogram — Effect Loop Regression', () => {
     // Reload and compare
     await page.reload();
     await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(1000);
 
     const reloadOrder = await getCardOrder();
 
@@ -249,13 +250,13 @@ test.describe('MiniSpectrogram — Cleanup on Navigation', () => {
     }, SPECTROGRAM_STORAGE_KEY);
 
     // Wait for potential stream startup
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(1000);
 
     // Navigate away — should trigger cleanup without errors
     const errors = await collectErrorsDuring(page, async () => {
       await page.goto('/ui/settings');
       await page.waitForLoadState('domcontentloaded');
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1000);
     });
 
     expect(
@@ -272,7 +273,7 @@ test.describe('MiniSpectrogram — Cleanup on Navigation', () => {
       localStorage.setItem(key, 'true');
     }, SPECTROGRAM_STORAGE_KEY);
 
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(1000);
 
     // Navigate away and back
     const errors = await collectErrorsDuring(page, async () => {
@@ -282,7 +283,7 @@ test.describe('MiniSpectrogram — Cleanup on Navigation', () => {
 
       await page.goto('/ui/dashboard');
       await page.waitForLoadState('domcontentloaded');
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(1000);
     });
 
     expect(

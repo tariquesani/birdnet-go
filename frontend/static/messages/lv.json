@@ -376,7 +376,9 @@
         "criticalSystem": "Kritiska sistēmas kļūda",
         "application": "Lietotnes kļūda",
         "imageProvider": "Attēlu nodrošinātāja paziņojums",
-        "categoryError": "{category} kļūda"
+        "categoryError": "{category} kļūda",
+        "burstTitle": "Multiple {component} errors",
+        "burstMessage": "{count} errors in the last {window_minutes} minutes: {sample_error}"
       },
       "settings": {
         "reloadingBirdnet": "Piemēro jaunos analīzes iestatījumus...",
@@ -891,6 +893,19 @@
         "family": "Dzimta",
         "genus": "Ģints",
         "species": "Suga"
+      }
+    },
+    "synonyms": {
+      "tabLabel": "Taksonomijas sinonīmi",
+      "description": "Pārrakstīt zinātnisko nosaukumu kartējumus, kas tiek izmantoti putnu attēlu meklēšanai. BirdNET izmanto 2021E taksonomiju, bet attēlu avoti var izmantot atjauninātus nosaukumus. Iebūvētie kartējumi vienmēr tiek ielādēti; jūsu pārrakstījumi papildina vai aizstāj tos.",
+      "birdnetName": "BirdNET nosaukums",
+      "updatedName": "Atjaunināts nosaukums",
+      "addButton": "Pievienot sinonīmu",
+      "emptyState": "Nav konfigurēti pielāgoti taksonomijas sinonīmi.",
+      "errors": {
+        "unknownSpecies": "Suga nav atrasta BirdNET etiķetēs",
+        "duplicateKey": "Sinonīms šai sugai jau pastāv",
+        "emptyUpdatedName": "Atjaunināts nosaukums ir obligāts"
       }
     },
     "tracking": {
@@ -3408,6 +3423,19 @@
           "description": "Noklikšķiniet \"Pievienot konfigurāciju\", lai pielāgotu sugu noteikšanas iestatījumus."
         }
       },
+      "synonyms": {
+        "tabLabel": "Sinonīmi",
+        "description": "Saistiet BirdNET sugu nosaukumus ar vēlamajiem nosaukumiem. Kad noteikšana atbilst sinonīmam, tiks izmantots atjauninātais nosaukums.",
+        "birdnetName": "BirdNET nosaukums",
+        "updatedName": "Atjaunināts nosaukums",
+        "addButton": "Pievienot sinonīmu",
+        "emptyState": "Nav konfigurēti taksonomijas sinonīmi",
+        "errors": {
+          "unknownSpecies": "Suga nav atrasta BirdNET etiķetēs",
+          "duplicateKey": "Šai sugai jau pastāv sinonīms",
+          "emptyUpdatedName": "Atjauninātais nosaukums ir obligāts"
+        }
+      },
       "actionsModal": {
         "title": "Darbības sugai {species}",
         "actionType": {
@@ -4353,5 +4381,17 @@
         "acknowledge": "I understand"
       }
     }
+  },
+  "restart": {
+    "applicationRestart": "Restartēt lietojumprogrammu",
+    "containerRestart": "Restartēt konteineru",
+    "confirmTitle": "Apstiprināt restartēšanu",
+    "confirmApplicationMessage": "Serveris tiks restartēts. Jūs uz laiku tiksiet atvienots.",
+    "confirmContainerMessage": "Konteiners tiks restartēts. Jūs uz laiku tiksiet atvienots.",
+    "inProgress": "Restartējas...",
+    "bannerTitle": "Nepieciešama restartēšana",
+    "bannerMessage": "Konfigurācijas izmaiņām nepieciešama restartēšana:",
+    "bannerAction": "Restartēt tagad",
+    "restartFailed": "Neizdevās sākt restartēšanu"
   }
 }

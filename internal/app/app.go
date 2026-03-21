@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -31,13 +33,36 @@ const (
 
 // App is the top-level application that owns all subsystems.
 type App struct {
-	services  []Service
-	analyzers []Analyzer
+	services   []Service
+	analyzers  []Analyzer
+	shutdownCh chan struct{}
+	closeOnce  sync.Once
 }
 
 // New creates a new App instance.
 func New() *App {
-	return &App{}
+	return &App{
+		shutdownCh: make(chan struct{}),
+	}
+}
+
+// globalApp provides access to the App instance for the restart wiring path
+// (API controller → App.RequestShutdown). Avoid using for other purposes.
+var globalApp atomic.Pointer[App]
+
+// SetGlobal stores the app instance for global access (e.g., by API handlers).
+func SetGlobal(a *App) {
+	globalApp.Store(a)
+}
+
+// GetGlobal returns the global app instance, or nil if not set.
+func GetGlobal() *App {
+	return globalApp.Load()
+}
+
+// RequestShutdown triggers a programmatic shutdown. Safe to call multiple times.
+func (a *App) RequestShutdown() {
+	a.closeOnce.Do(func() { close(a.shutdownCh) })
 }
 
 // Register adds services to the app in the order they should be started.
@@ -141,6 +166,9 @@ func (a *App) Wait() error {
 	case legacyErr = <-legacyErrChan:
 		log.Info("legacy service exited",
 			logger.Error(legacyErr),
+			logger.String("operation", "graceful_shutdown"))
+	case <-a.shutdownCh:
+		log.Info("programmatic shutdown requested",
 			logger.String("operation", "graceful_shutdown"))
 	}
 

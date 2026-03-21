@@ -376,7 +376,9 @@
         "criticalSystem": "Kritisk systemfejl",
         "application": "Applikationsfejl",
         "imageProvider": "Billedudbydermeddelelse",
-        "categoryError": "{category}-fejl"
+        "categoryError": "{category}-fejl",
+        "burstTitle": "Multiple {component} errors",
+        "burstMessage": "{count} errors in the last {window_minutes} minutes: {sample_error}"
       },
       "settings": {
         "reloadingBirdnet": "Anvender nye analyseindstillinger...",
@@ -891,6 +893,19 @@
         "family": "Familie",
         "genus": "Slægt",
         "species": "Art"
+      }
+    },
+    "synonyms": {
+      "tabLabel": "Taksonomiske synonymer",
+      "description": "Tilsidesæt videnskabelige navnetilknytninger brugt til fuglebilledsøgning. BirdNET bruger 2021E-taksonomien, men billedkilder kan bruge opdaterede navne. Indbyggede tilknytninger indlæses altid; dine tilsidesættelser tilføjes til eller erstatter dem.",
+      "birdnetName": "BirdNET-navn",
+      "updatedName": "Opdateret navn",
+      "addButton": "Tilføj synonym",
+      "emptyState": "Ingen brugerdefinerede taksonomiske synonymer konfigureret.",
+      "errors": {
+        "unknownSpecies": "Art ikke fundet i BirdNET-etiketter",
+        "duplicateKey": "Et synonym for denne art findes allerede",
+        "emptyUpdatedName": "Opdateret navn er påkrævet"
       }
     },
     "tracking": {
@@ -3408,6 +3423,19 @@
           "description": "Klik på \"Tilføj konfiguration\" for at tilpasse artsregistreringsindstillinger."
         }
       },
+      "synonyms": {
+        "tabLabel": "Synonymer",
+        "description": "Knyt BirdNET-artsnavne til dine foretrukne navne. Når en detektion matcher et synonym, bruges det opdaterede navn i stedet.",
+        "birdnetName": "BirdNET-navn",
+        "updatedName": "Opdateret navn",
+        "addButton": "Tilføj synonym",
+        "emptyState": "Ingen taksonomi-synonymer konfigureret",
+        "errors": {
+          "unknownSpecies": "Art ikke fundet i BirdNET-etiketter",
+          "duplicateKey": "Et synonym for denne art findes allerede",
+          "emptyUpdatedName": "Det opdaterede navn er påkrævet"
+        }
+      },
       "actionsModal": {
         "title": "Handlinger for {species}",
         "actionType": {
@@ -4353,5 +4381,17 @@
         "acknowledge": "I understand"
       }
     }
+  },
+  "restart": {
+    "applicationRestart": "Genstart applikation",
+    "containerRestart": "Genstart container",
+    "confirmTitle": "Bekræft genstart",
+    "confirmApplicationMessage": "Serveren genstarter. Du bliver midlertidigt afbrudt.",
+    "confirmContainerMessage": "Containeren genstarter. Du bliver midlertidigt afbrudt.",
+    "inProgress": "Genstarter...",
+    "bannerTitle": "Genstart påkrævet",
+    "bannerMessage": "Konfigurationsændringer kræver en genstart:",
+    "bannerAction": "Genstart nu",
+    "restartFailed": "Kunne ikke starte genstart"
   }
 }

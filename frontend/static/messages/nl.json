@@ -376,7 +376,9 @@
         "criticalSystem": "Kritieke systeemfout",
         "application": "Applicatiefout",
         "imageProvider": "Melding afbeeldingprovider",
-        "categoryError": "{category}-fout"
+        "categoryError": "{category}-fout",
+        "burstTitle": "Multiple {component} errors",
+        "burstMessage": "{count} errors in the last {window_minutes} minutes: {sample_error}"
       },
       "settings": {
         "reloadingBirdnet": "Nieuwe analyse-instellingen worden toegepast...",
@@ -893,6 +895,19 @@
         "species": "Soort"
       }
     },
+    "synonyms": {
+      "tabLabel": "Taxonomie-synoniemen",
+      "description": "Overschrijf de toewijzingen van wetenschappelijke namen die worden gebruikt voor het zoeken naar vogelafbeeldingen. BirdNET gebruikt de 2021E-taxonomie, maar afbeeldingsbronnen kunnen bijgewerkte namen gebruiken. Ingebouwde toewijzingen worden altijd geladen; uw overschrijvingen worden toegevoegd of vervangen deze.",
+      "birdnetName": "BirdNET-naam",
+      "updatedName": "Bijgewerkte naam",
+      "addButton": "Synoniem toevoegen",
+      "emptyState": "Geen aangepaste taxonomie-synoniemen geconfigureerd.",
+      "errors": {
+        "unknownSpecies": "Soort niet gevonden in BirdNET-labels",
+        "duplicateKey": "Er bestaat al een synoniem voor deze soort",
+        "emptyUpdatedName": "Bijgewerkte naam is vereist"
+      }
+    },
     "tracking": {
       "title": "Soortmonitoring",
       "newSpecies": "Nieuwe soort",
@@ -935,6 +950,9 @@
       "inferno": "Inferno",
       "viridis": "Viridis",
       "grayscale": "Grayscale"
+    },
+    "labels": {
+      "toggle": "Detectielabels aan/uit"
     }
   },
   "system": {
@@ -3372,6 +3390,19 @@
           "description": "Klik op \"Configuratie Toevoegen\" om soorten detectie instellingen aan te passen."
         }
       },
+      "synonyms": {
+        "tabLabel": "Synoniemen",
+        "description": "Koppel BirdNET-soortennamen aan uw voorkeursnamen. Wanneer een detectie overeenkomt met een synoniem, wordt de bijgewerkte naam gebruikt.",
+        "birdnetName": "BirdNET-naam",
+        "updatedName": "Bijgewerkte naam",
+        "addButton": "Synoniem toevoegen",
+        "emptyState": "Geen taxonomie-synoniemen geconfigureerd",
+        "errors": {
+          "unknownSpecies": "Soort niet gevonden in BirdNET-labels",
+          "duplicateKey": "Er bestaat al een synoniem voor deze soort",
+          "emptyUpdatedName": "De bijgewerkte naam is vereist"
+        }
+      },
       "actionsModal": {
         "title": "Acties voor {species}",
         "actionType": {
@@ -4355,5 +4386,17 @@
         "acknowledge": "I understand"
       }
     }
+  },
+  "restart": {
+    "applicationRestart": "Applicatie herstarten",
+    "containerRestart": "Container herstarten",
+    "confirmTitle": "Herstart bevestigen",
+    "confirmApplicationMessage": "De server wordt herstart. U wordt tijdelijk losgekoppeld.",
+    "confirmContainerMessage": "De container wordt herstart. U wordt tijdelijk losgekoppeld.",
+    "inProgress": "Herstarten...",
+    "bannerTitle": "Herstart vereist",
+    "bannerMessage": "Configuratiewijzigingen vereisen een herstart:",
+    "bannerAction": "Nu herstarten",
+    "restartFailed": "Kan herstart niet starten"
   }
 }

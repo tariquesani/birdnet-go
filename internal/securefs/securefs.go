@@ -4,6 +4,7 @@
 package securefs
 
 import (
+	stdErrors "errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -600,9 +601,16 @@ func getContentType(path string) string {
 func (sfs *SecureFS) serveInternal(c echo.Context, opener func() (*os.File, string, error)) error {
 	f, effectivePath, err := opener()
 	if err != nil {
-		GetLogger().Error("Error opening file via opener",
-			logger.String("path", effectivePath),
-			logger.Error(err))
+		// File-not-found is expected during the race window between detection
+		// DB commit and audio export completion — log at debug, not error.
+		if stdErrors.Is(err, fs.ErrNotExist) {
+			GetLogger().Debug("File not found via opener",
+				logger.String("path", effectivePath))
+		} else {
+			GetLogger().Error("Error opening file via opener",
+				logger.String("path", effectivePath),
+				logger.Error(err))
+		}
 		return mapOpenErrorToHTTP(err, effectivePath)
 	}
 	defer func() {
@@ -648,6 +656,13 @@ func (sfs *SecureFS) ServeFile(c echo.Context, path string) error {
 		// Open the file using the sandboxed root
 		file, err := sfs.root.Open(relPath)
 		if err != nil {
+			// File-not-found is expected during the race window between detection
+			// DB commit and audio export completion. The API layer handles this
+			// gracefully (handleAudio404WithWait). Use plain error wrapping to
+			// avoid triggering telemetry hooks and creating noise notifications.
+			if stdErrors.Is(err, fs.ErrNotExist) {
+				return nil, relPath, fmt.Errorf("openat %s: %w", relPath, err)
+			}
 			// Wrap operational errors for context
 			return nil, relPath, errors.New(err).Component(componentSecurefs).Category(errors.CategoryFileIO).Context("operation", "serve_file_open").Build()
 		}
@@ -671,6 +686,13 @@ func (sfs *SecureFS) ServeRelativeFile(c echo.Context, relPath string) error {
 		// Open the file using the sandboxed root with the validated path
 		file, err := sfs.root.Open(validatedRelPath)
 		if err != nil {
+			// File-not-found is expected during the race window between detection
+			// DB commit and audio export completion. The API layer handles this
+			// gracefully (handleAudio404WithWait). Use plain error wrapping to
+			// avoid triggering telemetry hooks and creating noise notifications.
+			if stdErrors.Is(err, fs.ErrNotExist) {
+				return nil, validatedRelPath, fmt.Errorf("openat %s: %w", validatedRelPath, err)
+			}
 			// Wrap operational errors for context
 			return nil, validatedRelPath, errors.New(err).Component(componentSecurefs).Category(errors.CategoryFileIO).Context("operation", "serve_relative_file_open").Build()
 		}

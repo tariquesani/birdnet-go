@@ -2,6 +2,7 @@ package v2only
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -1204,4 +1205,97 @@ func TestGetSpeciesSummaryData_WithDateFilter(t *testing.T) {
 	summaries, err = ds.GetSpeciesSummaryData(t.Context(), "2024-07-01", "2024-07-31")
 	require.NoError(t, err)
 	assert.Empty(t, summaries, "should return empty for dates with no detections")
+}
+
+func TestV2OnlyDatastore_UpdateNameMaps(t *testing.T) {
+	t.Parallel()
+
+	// Start with English labels
+	englishLabels := []string{
+		"Turdus merula_Common Blackbird",
+		"Parus major_Great Tit",
+	}
+	ds, cleanup := setupTestDatastoreWithLabels(t, englishLabels)
+	t.Cleanup(cleanup)
+
+	// Verify initial English resolution
+	assert.Equal(t, "Common Blackbird", ds.resolveCommonName("Turdus merula"))
+	assert.Equal(t, "Great Tit", ds.resolveCommonName("Parus major"))
+	assert.Equal(t, "Turdus merula", ds.resolveToScientificName("common blackbird"))
+
+	// Switch to Finnish labels
+	finnishLabels := []string{
+		"Turdus merula_mustarastas",
+		"Parus major_talitiainen",
+		"Strix aluco_lehtopöllö",
+	}
+	ds.UpdateNameMaps(finnishLabels)
+
+	// Verify Finnish resolution
+	assert.Equal(t, "mustarastas", ds.resolveCommonName("Turdus merula"))
+	assert.Equal(t, "talitiainen", ds.resolveCommonName("Parus major"))
+	assert.Equal(t, "lehtopöllö", ds.resolveCommonName("Strix aluco"))
+
+	// Verify reverse lookup works with new locale
+	assert.Equal(t, "Turdus merula", ds.resolveToScientificName("mustarastas"))
+
+	// Verify old English names no longer resolve
+	assert.Equal(t, "common blackbird", ds.resolveToScientificName("common blackbird"),
+		"Old English common name should no longer resolve to scientific name")
+
+	// Verify unknown species still falls back to scientific name
+	assert.Equal(t, "Unknown species", ds.resolveCommonName("Unknown species"))
+}
+
+func TestV2OnlyDatastore_UpdateNameMaps_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
+	labels := []string{"Turdus merula_Common Blackbird"}
+	ds, cleanup := setupTestDatastoreWithLabels(t, labels)
+	t.Cleanup(cleanup)
+
+	var wg sync.WaitGroup
+	const goroutines = 50
+	const iterations = 100
+
+	expectedCommon := map[string]bool{"Common Blackbird": true, "mustarastas": true}
+
+	// Concurrent common name readers
+	for range goroutines {
+		wg.Go(func() {
+			for range iterations {
+				name := ds.resolveCommonName("Turdus merula")
+				assert.Contains(t, expectedCommon, name,
+					"Common name must be from one of the two snapshots")
+			}
+		})
+	}
+
+	// Concurrent reverse lookup readers (scientific name is stable across both snapshots)
+	for range goroutines / 2 {
+		wg.Go(func() {
+			for range iterations {
+				// Both snapshots map some common name → "Turdus merula",
+				// so the scientific name should always resolve correctly
+				sci := ds.resolveToScientificName("common blackbird")
+				if sci != "common blackbird" {
+					assert.Equal(t, "Turdus merula", sci)
+				}
+				sci = ds.resolveToScientificName("mustarastas")
+				if sci != "mustarastas" {
+					assert.Equal(t, "Turdus merula", sci)
+				}
+			}
+		})
+	}
+
+	// Concurrent writer
+	wg.Go(func() {
+		for range iterations {
+			ds.UpdateNameMaps([]string{"Turdus merula_mustarastas"})
+			ds.UpdateNameMaps([]string{"Turdus merula_Common Blackbird"})
+		}
+	})
+
+	wg.Wait()
 }

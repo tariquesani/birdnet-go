@@ -30,7 +30,37 @@ type SSEPendingDetection struct {
 	Thumbnail      string                 `json:"thumbnail"`      // Bird image URL
 	Status         PendingDetectionStatus `json:"status"`         // "active", "approved", "rejected"
 	FirstDetected  int64                  `json:"firstDetected"`  // Unix timestamp (seconds)
+	LastUpdated    int64                  `json:"lastUpdated"`    // Unix seconds — most recent inference hit
 	Source         string                 `json:"source"`         // Source display name
+	SourceID       string                 `json:"sourceID"`       // Raw source ID for client-side filtering
+	HitCount       int                    `json:"hitCount"`       // Number of inference hits accumulated
+}
+
+// sortPendingSnapshot sorts a pending detection snapshot by FirstDetected
+// (oldest first), with species name and source ID as tie-breakers for determinism.
+// This ordering is required by pendingSnapshotChanged which does index-based comparison.
+func sortPendingSnapshot(s []SSEPendingDetection) {
+	slices.SortFunc(s, func(a, b SSEPendingDetection) int {
+		if a.FirstDetected != b.FirstDetected {
+			if a.FirstDetected < b.FirstDetected {
+				return -1
+			}
+			return 1
+		}
+		if a.Species != b.Species {
+			if a.Species < b.Species {
+				return -1
+			}
+			return 1
+		}
+		if a.SourceID < b.SourceID {
+			return -1
+		}
+		if a.SourceID > b.SourceID {
+			return 1
+		}
+		return 0
+	})
 }
 
 // CalculateVisibilityThreshold computes the minimum hit count for a pending
@@ -65,28 +95,15 @@ func (p *Processor) SnapshotVisiblePending(minDetections int) []SSEPendingDetect
 			Thumbnail:      p.getThumbnailURL(item.Detection.Result.Species.ScientificName),
 			Status:         PendingStatusActive,
 			FirstDetected:  item.CreatedAt.Unix(),
+			LastUpdated:    item.LastUpdated.Unix(),
 			Source:         p.getDisplayNameForSource(item.Source),
+			SourceID:       item.Source,
+			HitCount:       item.Count,
 		})
 	}
 	p.pendingMutex.RUnlock()
 
-	// Sort by FirstDetected (oldest first) for stable ordering across broadcasts.
-	slices.SortFunc(result, func(a, b SSEPendingDetection) int {
-		if a.FirstDetected != b.FirstDetected {
-			if a.FirstDetected < b.FirstDetected {
-				return -1
-			}
-			return 1
-		}
-		// Tie-break by species name for determinism.
-		if a.Species < b.Species {
-			return -1
-		}
-		if a.Species > b.Species {
-			return 1
-		}
-		return 0
-	})
+	sortPendingSnapshot(result)
 
 	return result
 }
@@ -105,7 +122,9 @@ func (p *Processor) getThumbnailURL(scientificName string) string {
 }
 
 // broadcastPendingSnapshot broadcasts a pending detection snapshot via the
-// PendingBroadcaster callback. If no broadcaster is set, this is a no-op.
+// PendingBroadcaster callback only when the snapshot differs from the last
+// broadcast (new species, removed species, or updated hit counts).
+// If no broadcaster is set, this is a no-op.
 func (p *Processor) broadcastPendingSnapshot(snapshot []SSEPendingDetection) {
 	p.pendingBroadcasterMu.RLock()
 	broadcaster := p.PendingBroadcaster
@@ -114,6 +133,19 @@ func (p *Processor) broadcastPendingSnapshot(snapshot []SSEPendingDetection) {
 	if broadcaster == nil {
 		return
 	}
+
+	// Skip broadcast if snapshot is identical to the last one sent.
+	// This prevents spamming SSE clients with repeated messages when
+	// no new predictions arrived for any visible pending species.
+	p.lastBroadcastSnapshotMu.Lock()
+	if !pendingSnapshotChanged(p.lastBroadcastSnapshot, snapshot) {
+		p.lastBroadcastSnapshotMu.Unlock()
+		return
+	}
+	// Store a copy so subsequent comparisons are independent.
+	p.lastBroadcastSnapshot = make([]SSEPendingDetection, len(snapshot))
+	copy(p.lastBroadcastSnapshot, snapshot)
+	p.lastBroadcastSnapshotMu.Unlock()
 
 	broadcaster(snapshot)
 }
@@ -127,8 +159,29 @@ func (p *Processor) buildFlushNotification(item *PendingDetection, status Pendin
 		Thumbnail:      p.getThumbnailURL(item.Detection.Result.Species.ScientificName),
 		Status:         status,
 		FirstDetected:  item.CreatedAt.Unix(),
+		LastUpdated:    item.LastUpdated.Unix(),
 		Source:         p.getDisplayNameForSource(item.Source),
+		SourceID:       item.Source,
+		HitCount:       item.Count,
 	}
+}
+
+// pendingSnapshotChanged reports whether two sorted pending snapshots differ
+// in species composition, hit counts, or status.
+func pendingSnapshotChanged(prev, curr []SSEPendingDetection) bool {
+	if len(prev) != len(curr) {
+		return true
+	}
+	for i := range prev {
+		if prev[i].Species != curr[i].Species ||
+			prev[i].SourceID != curr[i].SourceID ||
+			prev[i].HitCount != curr[i].HitCount ||
+			prev[i].Status != curr[i].Status ||
+			prev[i].LastUpdated != curr[i].LastUpdated {
+			return true
+		}
+	}
+	return false
 }
 
 // logPendingBroadcast logs pending broadcast activity at debug level.

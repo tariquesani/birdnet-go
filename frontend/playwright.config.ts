@@ -12,7 +12,9 @@ export default defineConfig({
   forbidOnly: isCI,
   retries: isCI ? 2 : 0,
   workers: isCI ? 1 : undefined,
-  reporter: [['html'], ['junit', { outputFile: 'test-results/junit.xml' }], ['github']],
+  reporter: isCI
+    ? [['blob'], ['github']]
+    : [['html'], ['junit', { outputFile: 'test-results/junit.xml' }]],
 
   use: {
     baseURL,

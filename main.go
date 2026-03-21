@@ -19,6 +19,7 @@ import (
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/logger"
+	"github.com/tphakala/birdnet-go/internal/restart"
 	"github.com/tphakala/birdnet-go/internal/telemetry"
 )
 
@@ -36,6 +37,25 @@ var imageProviderRegistry *imageprovider.ImageProviderRegistry
 
 func main() {
 	exitCode := mainWithExitCode()
+
+	// Check if a restart was requested. All deferred cleanup in
+	// mainWithExitCode (telemetry, logger, pprof) has already completed.
+	if rt := restart.Requested(); rt != restart.RestartNone {
+		switch rt {
+		case restart.RestartBinary:
+			if err := restart.Exec(); err != nil {
+				fmt.Fprintf(os.Stderr, "restart failed: %v\n", err)
+				os.Exit(1)
+			}
+		case restart.RestartContainer:
+			// Non-zero exit code ensures restart with all container restart
+			// policies (always, unless-stopped, on-failure).
+			os.Exit(42)
+		default:
+			// RestartNone is excluded by the outer if; future types fall through.
+		}
+	}
+
 	os.Exit(exitCode)
 }
 
@@ -90,6 +110,11 @@ func mainWithExitCode() int {
 		bootLog.Error("Failed to load configuration")
 		return 1
 	}
+
+	// Apply taxonomy synonym overrides from config.
+	// Pass nil for knownLabels: BirdNET labels are not yet loaded at this stage.
+	// Validation only runs via the API settings endpoint where labels are populated.
+	imageprovider.SetCustomSynonyms(settings.TaxonomySynonyms, nil)
 
 	// Set runtime values
 	settings.Version = version

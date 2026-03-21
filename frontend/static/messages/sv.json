@@ -376,7 +376,9 @@
         "criticalSystem": "Kritiskt systemfel",
         "application": "Applikationsfel",
         "imageProvider": "Bildleverantörsmeddelande",
-        "categoryError": "{category}-fel"
+        "categoryError": "{category}-fel",
+        "burstTitle": "Multiple {component} errors",
+        "burstMessage": "{count} errors in the last {window_minutes} minutes: {sample_error}"
       },
       "settings": {
         "reloadingBirdnet": "Tillämpar nya analysinställningar...",
@@ -891,6 +893,19 @@
         "family": "Familj",
         "genus": "Släkte",
         "species": "Art"
+      }
+    },
+    "synonyms": {
+      "tabLabel": "Taxonomiska synonymer",
+      "description": "Åsidosätt vetenskapliga namntilldelningar som används för fågelbildsökning. BirdNET använder 2021E-taxonomin, men bildkällor kan använda uppdaterade namn. Inbyggda tilldelningar laddas alltid; dina åsidosättningar läggs till eller ersätter dem.",
+      "birdnetName": "BirdNET-namn",
+      "updatedName": "Uppdaterat namn",
+      "addButton": "Lägg till synonym",
+      "emptyState": "Inga anpassade taxonomiska synonymer konfigurerade.",
+      "errors": {
+        "unknownSpecies": "Art hittades inte i BirdNET-etiketter",
+        "duplicateKey": "En synonym för denna art finns redan",
+        "emptyUpdatedName": "Uppdaterat namn krävs"
       }
     },
     "tracking": {
@@ -3408,6 +3423,19 @@
           "description": "Klicka på \"Lägg till konfiguration\" för att anpassa artdetekteringsinställningar."
         }
       },
+      "synonyms": {
+        "tabLabel": "Synonymer",
+        "description": "Koppla BirdNET-artnamn till dina föredragna namn. När en detektion matchar en synonym används det uppdaterade namnet istället.",
+        "birdnetName": "BirdNET-namn",
+        "updatedName": "Uppdaterat namn",
+        "addButton": "Lägg till synonym",
+        "emptyState": "Inga taxonomisynonymer konfigurerade",
+        "errors": {
+          "unknownSpecies": "Arten hittades inte i BirdNET-etiketter",
+          "duplicateKey": "En synonym för denna art finns redan",
+          "emptyUpdatedName": "Det uppdaterade namnet är obligatoriskt"
+        }
+      },
       "actionsModal": {
         "title": "Åtgärder för {species}",
         "actionType": {
@@ -4353,5 +4381,17 @@
         "acknowledge": "I understand"
       }
     }
+  },
+  "restart": {
+    "applicationRestart": "Starta om applikation",
+    "containerRestart": "Starta om container",
+    "confirmTitle": "Bekräfta omstart",
+    "confirmApplicationMessage": "Servern startar om. Du kopplas tillfälligt bort.",
+    "confirmContainerMessage": "Containern startar om. Du kopplas tillfälligt bort.",
+    "inProgress": "Startar om...",
+    "bannerTitle": "Omstart krävs",
+    "bannerMessage": "Konfigurationsändringar kräver en omstart:",
+    "bannerAction": "Starta om nu",
+    "restartFailed": "Det gick inte att starta om"
   }
 }

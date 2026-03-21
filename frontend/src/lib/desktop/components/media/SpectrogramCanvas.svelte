@@ -38,6 +38,10 @@
     isActive?: boolean;
     /** Additional CSS classes for the container */
     className?: string;
+    /** Detection labels to render on the spectrogram */
+    overlayLabels?: Array<{ text: string; birthTime: number; ySlot: number }>;
+    /** Font size for overlay labels in CSS pixels (default: 11) */
+    overlayFontSize?: number;
   }
 
   let {
@@ -50,16 +54,16 @@
     scrollSpeed = 60,
     isActive = false,
     className = '',
+    overlayLabels = [],
+    overlayFontSize = 11,
   }: Props = $props();
 
   let canvasEl: HTMLCanvasElement | undefined = $state();
+  let overlayCanvasEl: HTMLCanvasElement | undefined = $state();
   let containerEl: HTMLDivElement | undefined = $state();
   // CSS pixel dimensions (from ResizeObserver)
   let cssWidth = $state(800);
   let cssHeight = $state(300);
-
-  // Timing exposure for future DetectionOverlay
-  let startTime = $state(0);
 
   // DPR tracking
   let dpr = $state(globalThis.devicePixelRatio ?? 1);
@@ -82,6 +86,7 @@
       const freqRatio = 1 - y / (height - 1 || 1);
       const freq = minFreq + freqRatio * (maxFreq - minFreq);
       const binIndex = Math.round((freq / nyquist) * (binCount - 1));
+      // eslint-disable-next-line security/detect-object-injection -- y is a loop counter bounded by canvas height
       map[y] = Math.max(0, Math.min(binCount - 1, binIndex));
     }
 
@@ -89,18 +94,8 @@
   });
 
   // Selected color LUT
+  // eslint-disable-next-line security/detect-object-injection -- colorMap is typed as ColorMapName
   let colorLUT = $derived(COLOR_MAPS[colorMap] ?? COLOR_MAPS[DEFAULT_COLOR_MAP]);
-
-  // Internal timestampToX for future use (not exported — Svelte 5 limitation)
-  function timestampToX(eventTime: number): number {
-    const elapsed = (performance.now() - startTime) / 1000;
-    const eventAge = elapsed - (eventTime - startTime / 1000);
-    const x = cssWidth - eventAge * scrollSpeed;
-    return x >= 0 ? x : -1;
-  }
-
-  // Suppress unused function warning — timestampToX will be used by DetectionOverlay
-  void timestampToX;
 
   // ResizeObserver with debouncing (100ms)
   $effect(() => {
@@ -171,6 +166,10 @@
           if (ctx) {
             ctx.drawImage(tempCanvas, 0, 0, oldW, oldH, 0, 0, newW, newH);
           }
+          if (overlayCanvasEl) {
+            overlayCanvasEl.width = newW;
+            overlayCanvasEl.height = newH;
+          }
           logger.debug('Canvas resized with content preserved', { oldW, oldH, newW, newH });
           return;
         }
@@ -182,6 +181,10 @@
     // Fallback: simple resize (clears canvas)
     canvasEl.width = newW;
     canvasEl.height = newH;
+    if (overlayCanvasEl) {
+      overlayCanvasEl.width = newW;
+      overlayCanvasEl.height = newH;
+    }
   });
 
   // Main animation loop
@@ -191,10 +194,30 @@
     const ctx = canvasEl.getContext('2d');
     if (!ctx) return;
 
-    startTime = performance.now();
+    // Cache overlay canvas context outside the loop
+    const olCtx = overlayCanvasEl?.getContext('2d') ?? null;
+    const fontSize = overlayFontSize * dpr;
+
+    // Ensure overlay canvas buffer dimensions match the waterfall canvas.
+    // The resize $effect may not have fired yet when this effect starts
+    // (overlayCanvasEl wasn't bound during the initial resize), leaving
+    // the canvas buffer at 0x0 (invisible drawing).
+    if (
+      overlayCanvasEl &&
+      (overlayCanvasEl.width !== canvasEl.width || overlayCanvasEl.height !== canvasEl.height)
+    ) {
+      overlayCanvasEl.width = canvasEl.width;
+      overlayCanvasEl.height = canvasEl.height;
+    }
+
+    // Overlay font/style is set per-frame in the render loop (canvas state
+    // can be lost on resize), so no initial setup needed here.
+
     let lastFrameTime = performance.now();
     let scrollAccumulator = 0;
     let frameId: number;
+    // Track whether overlay was drawn last frame to avoid clearing an already-empty canvas
+    let overlayHadContent = false;
 
     // Convert CSS px/s to device px/s
     const deviceScrollSpeed = scrollSpeed * dpr;
@@ -227,14 +250,49 @@
 
         for (let col = 0; col < pixelsToScroll; col++) {
           for (let y = 0; y < h; y++) {
+            /* eslint-disable security/detect-object-injection -- loop indices and typed array lookups */
             const binIndex = currentBinMap[y];
             const magnitude = frequencyData[binIndex];
             data[y * pixelsToScroll + col] = currentLUT[magnitude];
+            /* eslint-enable security/detect-object-injection */
           }
         }
 
         // putImageData works in raw device pixel coordinates (no transform needed)
         ctx.putImageData(imgData, w - pixelsToScroll, 0);
+      }
+
+      // --- Overlay detection labels on separate canvas (avoids self-blit smearing) ---
+      if (olCtx && overlayLabels.length > 0) {
+        olCtx.clearRect(0, 0, deviceWidth, deviceHeight);
+
+        // Re-apply styles every frame (canvas state can be lost on resize)
+        olCtx.font = `bold ${fontSize}px sans-serif`;
+        olCtx.fillStyle = '#ffffff';
+        olCtx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+        olCtx.shadowBlur = 3 * dpr;
+        olCtx.shadowOffsetX = 1 * dpr;
+        olCtx.shadowOffsetY = 1 * dpr;
+        olCtx.textBaseline = 'middle';
+
+        const maxSlots = Math.max(2, Math.floor(deviceHeight / (fontSize * 2.5)));
+
+        for (const label of overlayLabels) {
+          const labelAge = (now - label.birthTime) / 1000;
+          const x = deviceWidth - labelAge * deviceScrollSpeed;
+
+          if (x < -200 * dpr || x > deviceWidth) continue;
+
+          const slotHeight = deviceHeight / (maxSlots + 1);
+          const y = slotHeight * (1 + (label.ySlot % maxSlots));
+
+          olCtx.fillText(label.text, x, y);
+        }
+        overlayHadContent = true;
+      } else if (olCtx && overlayHadContent) {
+        // Only clear overlay when transitioning from content to empty
+        olCtx.clearRect(0, 0, deviceWidth, deviceHeight);
+        overlayHadContent = false;
       }
 
       frameId = requestAnimationFrame(loop);
@@ -247,4 +305,10 @@
 
 <div bind:this={containerEl} class="relative overflow-hidden bg-black {className}">
   <canvas bind:this={canvasEl} style:width="100%" style:height="100%"></canvas>
+  <canvas
+    bind:this={overlayCanvasEl}
+    style:width="100%"
+    style:height="100%"
+    class="pointer-events-none absolute inset-0 z-10"
+  ></canvas>
 </div>

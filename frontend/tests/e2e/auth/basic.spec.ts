@@ -25,9 +25,7 @@ test.describe('Authentication - New UI Only', () => {
 
     // Check if we stayed on settings page (publicly accessible)
     const isOnSettingsPage = currentUrl.includes('/ui/settings');
-    const hasSettingsContent = await page
-      .locator('[data-testid="main-content"], main, [role="main"]')
-      .isVisible();
+    const hasSettingsContent = await page.locator('main').first().isVisible();
 
     if (isRedirectedToLogin || hasLoginForm) {
       // Assert we were redirected or show login form
@@ -54,7 +52,7 @@ test.describe('Authentication - New UI Only', () => {
     } else if (isOnSettingsPage && hasSettingsContent) {
       // Assert we stayed on settings (publicly accessible)
       await expect(page).toHaveURL(/.*\/ui\/settings/);
-      await expect(page.locator('[data-testid="main-content"], main, [role="main"]')).toBeVisible();
+      await expect(page.locator('main').first()).toBeVisible();
     } else {
       // Unexpected state - fail the test
       throw new Error(

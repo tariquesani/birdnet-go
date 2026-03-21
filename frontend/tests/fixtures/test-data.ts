@@ -16,15 +16,54 @@ function getApiUrl(path: string): string {
   return new URL(path, baseUrl).toString();
 }
 
+// Cached CSRF credentials for test API calls (token + cookie)
+let cachedCsrf: { token: string; cookie: string } | null = null;
+
+// Fetch CSRF token and cookie from app config endpoint.
+// The CSRF middleware validates the header token against the cookie,
+// so we need both for POST requests to succeed.
+async function getCsrf(): Promise<{ token: string; cookie: string } | null> {
+  if (cachedCsrf) return cachedCsrf;
+
+  try {
+    const url = getApiUrl('/api/v2/app/config');
+    const response = await fetch(url);
+    if (response.ok) {
+      const data = await response.json();
+      // Extract csrf cookie from Set-Cookie header
+      const setCookie = response.headers.get('set-cookie') ?? '';
+      const csrfCookieMatch = setCookie.match(/csrf=([^;]+)/);
+      if (data.csrfToken && csrfCookieMatch?.[1]) {
+        cachedCsrf = { token: data.csrfToken, cookie: `csrf=${csrfCookieMatch[1]}` };
+        return cachedCsrf;
+      }
+    }
+  } catch {
+    // CSRF fetch failed — proceed without it
+  }
+  return null;
+}
+
 // Helper for API calls with proper error handling
 async function apiCall<T>(path: string, options: RequestInit = {}): Promise<T> {
   const url = getApiUrl(path);
+
+  // Include CSRF token and cookie for state-changing requests
+  const csrfHeaders: Record<string, string> = {};
+  if (options.method && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(options.method)) {
+    const csrf = await getCsrf();
+    if (csrf) {
+      csrfHeaders['X-CSRF-Token'] = csrf.token;
+      csrfHeaders['Cookie'] = csrf.cookie;
+    }
+  }
 
   try {
     const response = await fetch(url, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
+        ...csrfHeaders,
         ...options.headers,
       },
     });

@@ -376,7 +376,9 @@
         "criticalSystem": "Erreur système critique",
         "application": "Erreur d'application",
         "imageProvider": "Avis du fournisseur d'images",
-        "categoryError": "Erreur {category}"
+        "categoryError": "Erreur {category}",
+        "burstTitle": "Multiple {component} errors",
+        "burstMessage": "{count} errors in the last {window_minutes} minutes: {sample_error}"
       },
       "settings": {
         "reloadingBirdnet": "Application des nouveaux paramètres d'analyse...",
@@ -893,6 +895,19 @@
         "species": "Espèce"
       }
     },
+    "synonyms": {
+      "tabLabel": "Synonymes taxonomiques",
+      "description": "Remplacer les correspondances de noms scientifiques utilisées pour la recherche d'images d'oiseaux. BirdNET utilise la taxonomie 2021E, mais les sources d'images peuvent utiliser des noms mis à jour. Les correspondances intégrées sont toujours chargées ; vos remplacements s'ajoutent ou les remplacent.",
+      "birdnetName": "Nom BirdNET",
+      "updatedName": "Nom mis à jour",
+      "addButton": "Ajouter un synonyme",
+      "emptyState": "Aucun synonyme taxonomique personnalisé configuré.",
+      "errors": {
+        "unknownSpecies": "Espèce introuvable dans les étiquettes BirdNET",
+        "duplicateKey": "Un synonyme pour cette espèce existe déjà",
+        "emptyUpdatedName": "Le nom mis à jour est requis"
+      }
+    },
     "tracking": {
       "title": "Suivi des espèces",
       "newSpecies": "Nouvelle espèce",
@@ -935,6 +950,9 @@
       "inferno": "Inferno",
       "viridis": "Viridis",
       "grayscale": "Grayscale"
+    },
+    "labels": {
+      "toggle": "Basculer les étiquettes de détection"
     }
   },
   "system": {
@@ -3372,6 +3390,19 @@
           "description": "Click \"Add Configuration\" to customize species detection settings."
         }
       },
+      "synonyms": {
+        "tabLabel": "Synonymes",
+        "description": "Associez les noms d'espèces BirdNET à vos noms préférés. Lors d'une détection correspondant à un synonyme, le nom mis à jour sera utilisé.",
+        "birdnetName": "Nom BirdNET",
+        "updatedName": "Nom mis à jour",
+        "addButton": "Ajouter un synonyme",
+        "emptyState": "Aucun synonyme de taxonomie configuré",
+        "errors": {
+          "unknownSpecies": "Espèce introuvable dans les labels BirdNET",
+          "duplicateKey": "Un synonyme pour cette espèce existe déjà",
+          "emptyUpdatedName": "Le nom mis à jour est requis"
+        }
+      },
       "actionsModal": {
         "title": "Actions pour {species}",
         "actionType": {
@@ -4355,5 +4386,17 @@
         "acknowledge": "I understand"
       }
     }
+  },
+  "restart": {
+    "applicationRestart": "Redémarrer l'application",
+    "containerRestart": "Redémarrer le conteneur",
+    "confirmTitle": "Confirmer le redémarrage",
+    "confirmApplicationMessage": "Le serveur va redémarrer. Vous serez temporairement déconnecté.",
+    "confirmContainerMessage": "Le conteneur va redémarrer. Vous serez temporairement déconnecté.",
+    "inProgress": "Redémarrage en cours...",
+    "bannerTitle": "Redémarrage requis",
+    "bannerMessage": "Les modifications de configuration nécessitent un redémarrage :",
+    "bannerAction": "Redémarrer maintenant",
+    "restartFailed": "Échec du lancement du redémarrage"
   }
 }

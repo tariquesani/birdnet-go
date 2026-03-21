@@ -22,9 +22,9 @@ permissions:
 
 jobs:
   e2e-tests:
-    name: Playwright E2E Tests
+    name: E2E Tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - name: Checkout code
@@ -93,7 +93,7 @@ jobs:
       - name: Run Playwright E2E tests
         working-directory: frontend
         run: npx playwright test --project=chromium
-        timeout-minutes: 10
+        timeout-minutes: 7
         env:
           CI: 'true'
 

@@ -751,6 +751,7 @@ export interface SettingsFormData {
   output?: OutputSettings;
   backup?: BackupSettings;
   notification?: NotificationSettings;
+  taxonomySynonyms?: Record<string, string>;
 }
 
 // Global settings state interface
@@ -991,6 +992,7 @@ function createEmptySettings(): SettingsFormData {
         },
       },
     },
+    taxonomySynonyms: {},
   };
 }
 
@@ -1184,6 +1186,13 @@ export const settingsActions = {
     });
   },
 
+  updateTaxonomySynonyms(synonyms: Record<string, string>) {
+    settingsStore.update(state => ({
+      ...state,
+      formData: { ...state.formData, taxonomySynonyms: synonyms },
+    }));
+  },
+
   async saveSettings() {
     settingsStore.update(state => ({ ...state, isSaving: true, error: null }));
     try {
@@ -1214,6 +1223,17 @@ export const settingsActions = {
       }
 
       await settingsAPI.save(coercedFormData);
+
+      // Refresh restart-required status from backend after save.
+      // Isolated try-catch: failure here must not mask a successful settings save.
+      try {
+        const { fetchRestartStatus } = await import('$lib/stores/restart.svelte');
+        await fetchRestartStatus();
+      } catch (e) {
+        // Non-critical: restart status refresh failed, but settings were saved.
+        // The banner may show stale state until next page load.
+        console.error('Failed to refresh restart status after settings save:', e);
+      }
 
       // Check if UI locale changed and apply it
       const newLocale = currentState.formData.realtime?.dashboard?.locale;
