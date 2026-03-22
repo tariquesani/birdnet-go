@@ -29,6 +29,16 @@ const (
 // Defined at package level to avoid duplication across initialization functions
 const sentryDSN = "https://b9269b6c0f8fae154df65be5a97e0435@o4509553065525248.ingest.de.sentry.io/4509553112186960"
 
+// sentryFrontendDSN is the Sentry DSN for the BirdNET-Go frontend.
+// Currently points to the same project as the backend. To separate,
+// create a new Sentry project and update this constant.
+const sentryFrontendDSN = sentryDSN
+
+// GetFrontendDSN returns the Sentry DSN for frontend error tracking.
+func GetFrontendDSN() string {
+	return sentryFrontendDSN
+}
+
 // DeferredMessage represents a message that was captured before Sentry initialization
 type DeferredMessage struct {
 	Message   string
@@ -37,13 +47,18 @@ type DeferredMessage struct {
 	Timestamp time.Time
 }
 
+// maxDeferredMessages is the maximum number of messages that can be queued
+// before Sentry initializes. Prevents unbounded memory growth.
+const maxDeferredMessages = 100
+
 // sentryInitialized tracks whether Sentry has been initialized
 var (
-	sentryInitialized  bool
-	deferredMessages   []DeferredMessage
-	deferredMutex      sync.Mutex
-	attachmentUploader *AttachmentUploader
-	testMode           int32 // testMode allows tests to bypass settings checks (0=false, 1=true)
+	sentryInitialized      bool
+	deferredMessages       []DeferredMessage
+	deferredMutex          sync.Mutex
+	deferredOverflowLogged bool
+	attachmentUploader     *AttachmentUploader
+	testMode               int32 // testMode allows tests to bypass settings checks (0=false, 1=true)
 )
 
 // shouldSkipTelemetry returns true if telemetry should be skipped.
@@ -95,6 +110,11 @@ func InitSentry(settings *conf.Settings) error {
 	// Check if Sentry is explicitly enabled (opt-in)
 	if !settings.Sentry.Enabled {
 		GetLogger().Info("Sentry telemetry is disabled (opt-in required)")
+		// Drain deferred messages — Sentry will never initialize
+		deferredMutex.Lock()
+		deferredMessages = nil
+		sentryInitialized = true
+		deferredMutex.Unlock()
 		return nil
 	}
 
@@ -655,6 +675,12 @@ func normalizeDirectCaptureErrorType(scrubbedMsg string) string {
 
 // CaptureError captures an error with privacy-compliant context
 func CaptureError(err error, component string) {
+	if err == nil {
+		GetLogger().Warn("CaptureError called with nil error",
+			logger.String("component", component))
+		return
+	}
+
 	if shouldSkipTelemetry() {
 		return
 	}
@@ -794,6 +820,16 @@ func CaptureMessageDeferred(message string, level sentry.Level, component string
 	if sentryInitialized {
 		// Sentry is already initialized, send immediately
 		CaptureMessage(message, level, component)
+		return
+	}
+
+	// Cap deferred messages to prevent unbounded growth
+	if len(deferredMessages) >= maxDeferredMessages {
+		if !deferredOverflowLogged {
+			deferredOverflowLogged = true
+			GetLogger().Warn("deferred message queue full, dropping new messages",
+				logger.Int("max", maxDeferredMessages))
+		}
 		return
 	}
 

@@ -74,6 +74,16 @@ function shouldThrottle(key: string): boolean {
   return true;
 }
 
+// Sentry integration hook — set by appState after Sentry initializes.
+// Uses dependency injection to avoid circular imports with appState.
+type CaptureErrorFn = ((error: Error, context?: { category?: string }) => void) | null;
+let _sentryCaptureError: CaptureErrorFn = null;
+
+/** Called by appState after Sentry initializes. Pass null to disconnect. */
+export function setSentryCaptureError(fn: CaptureErrorFn): void {
+  _sentryCaptureError = fn;
+}
+
 /**
  * Creates a logger instance for a specific category
  * @param category - The logging category (e.g., 'api', 'sse', 'auth')
@@ -143,9 +153,11 @@ export function getLogger(category: string): Logger {
       // Old: logger.error('message', error, 'extra', 'data')
       // New: logger.error('message', error, context, throttleKey)
 
-      // If called with console.error style (multiple arguments)
+      // Console-style: 3+ args where the third is not a structured context object.
+      // Uses > 2 (not > 1 like warn()) so that 2-arg calls logger.error('msg', error)
+      // reach the structured path where Sentry capture lives.
       if (
-        args.length > 1 &&
+        args.length > 2 &&
         (typeof args[2] === 'string' ||
           typeof args[2] === 'number' ||
           typeof args[2] !== 'object' ||
@@ -177,18 +189,14 @@ export function getLogger(category: string): Logger {
 
       if (error instanceof Error) {
         console.error(prefix, message, error, errorData);
-
-        // Future: This is where Sentry integration would go
-        // if (window.Sentry) {
-        //   window.Sentry.captureException(error, {
-        //     contexts: { logger: errorData },
-        //     tags: { category },
-        //   });
-        // }
       } else if (error) {
         console.error(prefix, message, error, errorData);
       } else {
         console.error(prefix, message, errorData);
+      }
+
+      if (error instanceof Error && _sentryCaptureError) {
+        _sentryCaptureError(error, { category });
       }
     },
 

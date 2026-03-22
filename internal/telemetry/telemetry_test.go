@@ -10,6 +10,7 @@ import (
 	"github.com/getsentry/sentry-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/privacy"
 )
 
@@ -441,6 +442,95 @@ func TestApplyStacktracePrivacyFilters_FatalLevel(t *testing.T) {
 	applyStacktracePrivacyFilters(event)
 
 	assert.NotNil(t, event.Exception[0].Stacktrace, "fatal-level events should retain stacktraces")
+}
+
+func TestInitSentry_DisabledDrainsQueue(t *testing.T) {
+	// Not parallel — mutates package-level state
+
+	EnableTestMode()
+	t.Cleanup(func() {
+		DisableTestMode()
+		deferredMutex.Lock()
+		deferredMessages = nil
+		sentryInitialized = false
+		deferredOverflowLogged = false
+		deferredMutex.Unlock()
+	})
+
+	// Pre-populate deferred messages
+	deferredMutex.Lock()
+	deferredMessages = []DeferredMessage{
+		{Message: "msg-1", Level: sentry.LevelWarning, Component: "test"},
+		{Message: "msg-2", Level: sentry.LevelError, Component: "test"},
+	}
+	sentryInitialized = false
+	deferredMutex.Unlock()
+
+	// Call InitSentry with Sentry disabled
+	settings := &conf.Settings{}
+	settings.Sentry.Enabled = false
+
+	err := InitSentry(settings)
+	require.NoError(t, err)
+
+	// Verify queue is drained and state is set
+	deferredMutex.Lock()
+	defer deferredMutex.Unlock()
+
+	assert.Nil(t, deferredMessages, "deferred messages should be nil after opt-out drain")
+	assert.True(t, sentryInitialized, "sentryInitialized should be true after opt-out")
+}
+
+func TestCaptureMessageDeferred_Cap(t *testing.T) {
+	// Not parallel — mutates package-level state
+
+	EnableTestMode()
+	t.Cleanup(func() {
+		DisableTestMode()
+		deferredMutex.Lock()
+		deferredMessages = nil
+		sentryInitialized = false
+		deferredOverflowLogged = false
+		deferredMutex.Unlock()
+	})
+
+	// Reset state so messages are deferred (not sent immediately)
+	deferredMutex.Lock()
+	deferredMessages = nil
+	sentryInitialized = false
+	deferredOverflowLogged = false
+	deferredMutex.Unlock()
+
+	// Queue more than maxDeferredMessages
+	for i := range maxDeferredMessages + 50 {
+		CaptureMessageDeferred(
+			fmt.Sprintf("msg-%d", i),
+			sentry.LevelWarning,
+			"test",
+		)
+	}
+
+	deferredMutex.Lock()
+	count := len(deferredMessages)
+	deferredMutex.Unlock()
+
+	assert.Equal(t, maxDeferredMessages, count,
+		"deferred queue should be capped at maxDeferredMessages")
+}
+
+func TestCaptureError_NilError(t *testing.T) {
+	// Not parallel — mutates package-level state (EnableTestMode)
+
+	// Enable test mode so telemetry functions don't skip
+	EnableTestMode()
+	t.Cleanup(func() {
+		DisableTestMode()
+	})
+
+	// CaptureError with nil should not panic
+	assert.NotPanics(t, func() {
+		CaptureError(nil, "test-component")
+	}, "CaptureError should not panic on nil error")
 }
 
 func TestCaptureMessage_InfoLevelFiltered(t *testing.T) {
