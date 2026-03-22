@@ -331,11 +331,14 @@ func (eb *EventBus) TryPublishDetection(event DetectionEvent) bool {
 		return false
 	}
 
-	if eb == nil || !eb.initialized.Load() || !eb.running.Load() {
+	if eb == nil {
+		return false
+	}
+	if !eb.initialized.Load() || !eb.running.Load() {
 		return false
 	}
 
-	// Debug logging for event publishing
+	// Debug logging for event publishing (gated behind config flag)
 	if eb.config != nil && eb.config.Debug {
 		eb.logger.Debug("publishing detection event",
 			logger.String("species", event.GetSpeciesName()),
@@ -366,13 +369,12 @@ func (eb *EventBus) TryPublishDetection(event DetectionEvent) bool {
 		// Channel full, drop the event
 		atomic.AddUint64(&eb.stats.EventsDropped, 1)
 
-		// Log at debug level to avoid spam
-		if eb.logger != nil {
-			eb.logger.Debug("detection event dropped due to full buffer",
-				logger.String("species", event.GetSpeciesName()),
-				logger.Bool("is_new_species", event.IsNewSpecies()),
-			)
-		}
+		eb.logger.Warn("detection event dropped due to full buffer",
+			logger.String("species", event.GetSpeciesName()),
+			logger.Bool("is_new_species", event.IsNewSpecies()),
+			logger.Int("buffer_used", len(eb.detectionEventChan)),
+			logger.Int("buffer_capacity", cap(eb.detectionEventChan)),
+		)
 		return false
 	}
 }
@@ -523,6 +525,21 @@ func (eb *EventBus) processDetectionEvent(event DetectionEvent, log logger.Logge
 	detectionConsumers := make([]DetectionEventConsumer, len(eb.detectionConsumers))
 	copy(detectionConsumers, eb.detectionConsumers)
 	eb.mu.Unlock()
+
+	if len(detectionConsumers) == 0 {
+		log.Warn("detection event received but no detection consumers registered",
+			logger.String("operation", "process_detection_event"),
+			logger.String("species", event.GetSpeciesName()),
+			logger.Bool("is_new_species", event.IsNewSpecies()))
+		return
+	}
+
+	log.Debug("dispatching detection event to consumers",
+		logger.String("operation", "process_detection_event"),
+		logger.String("species", event.GetSpeciesName()),
+		logger.Float64("confidence", event.GetConfidence()),
+		logger.Bool("is_new_species", event.IsNewSpecies()),
+		logger.Int("consumer_count", len(detectionConsumers)))
 
 	// No type assertions needed - iterate directly over detection consumers
 	for _, consumer := range detectionConsumers {

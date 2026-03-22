@@ -186,7 +186,7 @@
     name: '',
     urls: '',
     enabled: true,
-    filterTypes: ['detection'],
+    filterTypes: ['detection', 'warning'],
   });
   let serviceFormData = $state<ServiceFormData>({
     discordWebhookUrl: '',
@@ -790,7 +790,7 @@
       name: '',
       urls: '',
       enabled: true,
-      filterTypes: ['detection'],
+      filterTypes: ['detection', 'warning'],
     };
     showProviderForm = true;
   }

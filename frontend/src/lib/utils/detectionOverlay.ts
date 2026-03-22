@@ -16,6 +16,8 @@ export interface OverlayLabel {
   text: string;
   birthTime: number; // performance.now() when promoted
   ySlot: number;
+  firstDetected?: number; // Unix seconds — original detection time (for debug display)
+  promotionDelta?: number; // seconds — frozen offset at promotion (wallClock - firstDetected)
 }
 
 /** Minimal pending detection shape for diffing. */
@@ -23,13 +25,13 @@ interface PendingEntry {
   species: string;
   sourceID: string;
   firstDetected: number;
+  audioCapturedAt?: number;
   lastUpdated?: number;
   status: 'active' | 'approved' | 'rejected';
   hitCount?: number;
 }
 
 const DEDUP_INTERVAL_SECONDS = 6;
-const STALE_THRESHOLD_SECONDS = 6;
 
 /** How long (seconds) to keep a species in the dedup map after last label.
  *  Generous buffer beyond DEDUP_INTERVAL_SECONDS to avoid premature cleanup. */
@@ -88,10 +90,15 @@ export function promoteFromQueue(
 
   for (const label of queue) {
     if (wallClockAtPlayheadUnix >= label.firstDetected) {
+      // Back-date birthTime so the label appears at the waterfall position
+      // corresponding to firstDetected, not at the right edge.
+      const ageOffsetSec = Math.max(0, wallClockAtPlayheadUnix - label.firstDetected);
       promoted.push({
         text: label.text,
-        birthTime: performanceNow,
+        birthTime: performanceNow - ageOffsetSec * 1000,
         ySlot: label.ySlot,
+        firstDetected: label.firstDetected,
+        promotionDelta: ageOffsetSec,
       });
     } else {
       remaining.push(label);
@@ -107,39 +114,4 @@ export function promoteFromQueue(
 export function nextYSlot(counter: number, maxSlots: number): { slot: number; next: number } {
   const slot = counter % maxSlots;
   return { slot, next: counter + 1 };
-}
-
-/**
- * Generate repeat labels for species that are still actively detected.
- * A repeat label is emitted when:
- * 1. The species already has a previous label (exists in lastLabelledMap)
- * 2. More than DEDUP_INTERVAL_SECONDS have elapsed since the last label
- * 3. The species is still fresh (lastUpdated within STALE_THRESHOLD_SECONDS of nowUnix)
- *
- * Returns entries that should get new labels. The caller must update lastLabelledMap.
- */
-export function getRepeatLabels(
-  activePending: PendingEntry[],
-  activeSourceID: string,
-  lastLabelledMap: Map<string, number>,
-  nowUnix: number
-): PendingEntry[] {
-  const results: PendingEntry[] = [];
-
-  for (const entry of activePending) {
-    if (entry.sourceID !== activeSourceID || entry.status === 'rejected') continue;
-
-    const lastLabelTime = lastLabelledMap.get(entry.species);
-    if (lastLabelTime === undefined) continue; // No initial label yet — skip repeats
-
-    const lastUpdated = entry.lastUpdated ?? entry.firstDetected;
-    const isFresh = nowUnix - lastUpdated < STALE_THRESHOLD_SECONDS;
-    const intervalElapsed = nowUnix - lastLabelTime >= DEDUP_INTERVAL_SECONDS;
-
-    if (isFresh && intervalElapsed) {
-      results.push(entry);
-    }
-  }
-
-  return results;
 }

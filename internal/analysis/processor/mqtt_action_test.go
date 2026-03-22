@@ -9,6 +9,7 @@ package processor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -129,6 +130,7 @@ func TestMqttAction_Execute_UsesDetectionContextID(t *testing.T) {
 	settings := &conf.Settings{
 		Debug: true,
 	}
+	settings.Realtime.MQTT.Enabled = true
 	settings.Realtime.MQTT.Topic = testMQTTTopic
 
 	eventTracker := NewEventTracker(testEventTrackerInterval)
@@ -177,6 +179,7 @@ func TestMqttAction_Execute_PayloadContainsAllFields(t *testing.T) {
 	settings := &conf.Settings{
 		Debug: true,
 	}
+	settings.Realtime.MQTT.Enabled = true
 	settings.Realtime.MQTT.Topic = testMQTTTopic
 
 	eventTracker := NewEventTracker(testEventTrackerInterval)
@@ -255,6 +258,7 @@ func TestMqttAction_Execute_SourceID(t *testing.T) {
 	settings := &conf.Settings{
 		Debug: true,
 	}
+	settings.Realtime.MQTT.Enabled = true
 	settings.Realtime.MQTT.Topic = testMQTTTopic
 
 	eventTracker := NewEventTracker(testEventTrackerInterval)
@@ -286,17 +290,20 @@ func TestMqttAction_Execute_SourceID(t *testing.T) {
 		"sourceId should match AudioSource.ID for HA filtering")
 }
 
-// TestMqttAction_Execute_NotConnected verifies that MqttAction returns error
-// when not connected.
-func TestMqttAction_Execute_NotConnected(t *testing.T) {
+// TestMqttAction_Execute_TransientError_NonFatal verifies that transient connection
+// errors (EOF, not connected) are absorbed by MqttAction and do NOT fail the action.
+// This is the key behavioral change for GitHub #2397 — the detection is safe in the
+// database, so a missed MQTT notification is not data loss.
+func TestMqttAction_Execute_TransientError_NonFatal(t *testing.T) {
 	t.Parallel()
 
 	mockClient := NewMockMQTTClient()
-	mockClient.SetConnected(false)
+	mockClient.SetPublishError(fmt.Errorf("not connected to MQTT broker"))
 
 	settings := &conf.Settings{
 		Debug: true,
 	}
+	settings.Realtime.MQTT.Enabled = true
 	settings.Realtime.MQTT.Topic = testMQTTTopic
 
 	eventTracker := NewEventTracker(testEventTrackerInterval)
@@ -313,9 +320,37 @@ func TestMqttAction_Execute_NotConnected(t *testing.T) {
 		DetectionCtx: detectionCtx,
 	}
 
+	// Transient connection errors should return nil (non-fatal)
 	err := action.Execute(t.Context(), nil)
-	require.Error(t, err, "Should return error when not connected")
-	assert.Contains(t, err.Error(), "MQTT client not connected", "Error should indicate connection issue")
+	require.NoError(t, err, "Transient connection error should be non-fatal (detection is safe in DB)")
+}
+
+// TestMqttAction_Execute_EOFError_NonFatal verifies that EOF errors during publish
+// are treated as transient and do not fail the action (GitHub #2397).
+func TestMqttAction_Execute_EOFError_NonFatal(t *testing.T) {
+	t.Parallel()
+
+	mockClient := NewMockMQTTClient()
+	mockClient.SetPublishError(fmt.Errorf("connection lost: EOF"))
+
+	settings := &conf.Settings{
+		Debug: true,
+	}
+	settings.Realtime.MQTT.Enabled = true
+	settings.Realtime.MQTT.Topic = testMQTTTopic
+
+	eventTracker := NewEventTracker(testEventTrackerInterval)
+	det := testDetection()
+
+	action := &MqttAction{
+		Settings:     settings,
+		Result:       det.Result,
+		MqttClient:   mockClient,
+		EventTracker: eventTracker,
+	}
+
+	err := action.Execute(t.Context(), nil)
+	require.NoError(t, err, "EOF error should be non-fatal (GitHub #2397)")
 }
 
 // TestMqttAction_Execute_PublishesToConfiguredTopic verifies that the message
@@ -327,6 +362,7 @@ func TestMqttAction_Execute_PublishesToConfiguredTopic(t *testing.T) {
 	settings := &conf.Settings{
 		Debug: true,
 	}
+	settings.Realtime.MQTT.Enabled = true
 	settings.Realtime.MQTT.Topic = "homeassistant/sensor/birdnet/state"
 
 	eventTracker := NewEventTracker(testEventTrackerInterval)
@@ -359,6 +395,7 @@ func TestMqttAction_Execute_WithoutDetectionContext(t *testing.T) {
 	settings := &conf.Settings{
 		Debug: true,
 	}
+	settings.Realtime.MQTT.Enabled = true
 	settings.Realtime.MQTT.Topic = testMQTTTopic
 
 	eventTracker := NewEventTracker(testEventTrackerInterval)
@@ -396,6 +433,7 @@ func TestMqttAction_Execute_EmptyTopic(t *testing.T) {
 	settings := &conf.Settings{
 		Debug: true,
 	}
+	settings.Realtime.MQTT.Enabled = true
 	settings.Realtime.MQTT.Topic = "" // Empty topic
 
 	eventTracker := NewEventTracker(testEventTrackerInterval)
@@ -415,4 +453,33 @@ func TestMqttAction_Execute_EmptyTopic(t *testing.T) {
 	err := action.Execute(t.Context(), nil)
 	require.Error(t, err, "Should return error for empty topic")
 	assert.Contains(t, err.Error(), "MQTT topic is not specified", "Error should mention topic")
+}
+
+// TestMqttAction_Execute_DisabledAfterCreation verifies that MqttAction exits
+// silently when MQTT is disabled via settings after the action was created.
+// This supports hot-reload: disabling MQTT in the UI takes effect immediately.
+func TestMqttAction_Execute_DisabledAfterCreation(t *testing.T) {
+	t.Parallel()
+
+	mockClient := NewMockMQTTClient()
+	settings := &conf.Settings{}
+	settings.Realtime.MQTT.Enabled = true
+	settings.Realtime.MQTT.Topic = testMQTTTopic
+
+	eventTracker := NewEventTracker(testEventTrackerInterval)
+	det := testDetection()
+
+	action := &MqttAction{
+		Settings:     settings,
+		Result:       det.Result,
+		MqttClient:   mockClient,
+		EventTracker: eventTracker,
+	}
+
+	// Simulate runtime hot-reload toggle after action creation.
+	settings.Realtime.MQTT.Enabled = false
+
+	err := action.Execute(t.Context(), nil)
+	require.NoError(t, err, "Should silently return nil when MQTT is disabled")
+	assert.Equal(t, 0, mockClient.GetPublishCalls(), "Should not attempt publish when disabled")
 }

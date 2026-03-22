@@ -272,8 +272,22 @@ jobs:
                 ${GHCR_REPO}:podman-nightly-amd64-${DATE} \
                 ${GHCR_REPO}:podman-nightly-arm64-${DATE} || echo "Failed to create GHCR Podman nightly manifest"
               docker manifest push ${GHCR_REPO}:podman-nightly || echo "Failed to push GHCR Podman nightly manifest"
+
+              # Create latest manifest if requested
+              if [ "${{ inputs.create-latest-tag }}" = "true" ]; then
+                docker manifest create ${GHCR_REPO}:latest \
+                  ${GHCR_REPO}:nightly-amd64-${DATE} \
+                  ${GHCR_REPO}:nightly-arm64-${DATE} || echo "Failed to create GHCR latest manifest"
+                docker manifest push ${GHCR_REPO}:latest || echo "Failed to push GHCR latest manifest"
+
+                # Create Podman latest manifest
+                docker manifest create ${GHCR_REPO}:podman-latest \
+                  ${GHCR_REPO}:podman-nightly-amd64-${DATE} \
+                  ${GHCR_REPO}:podman-nightly-arm64-${DATE} || echo "Failed to create GHCR Podman latest manifest"
+                docker manifest push ${GHCR_REPO}:podman-latest || echo "Failed to push GHCR Podman latest manifest"
+              fi
             fi
-            
+
             # Docker Hub Manifests
             if [ "${{ inputs.push-to-dockerhub }}" = "true" ] && [ "${{ steps.dockerhub-login.outcome }}" = "success" ]; then
               echo "Creating Docker Hub nightly manifests..."
@@ -301,8 +315,22 @@ jobs:
                 ${DOCKERHUB_REPO}:podman-nightly-amd64-${DATE} \
                 ${DOCKERHUB_REPO}:podman-nightly-arm64-${DATE} || echo "Failed to create Docker Hub Podman nightly manifest"
               docker manifest push ${DOCKERHUB_REPO}:podman-nightly || echo "Failed to push Docker Hub Podman nightly manifest"
+
+              # Create latest manifest if requested
+              if [ "${{ inputs.create-latest-tag }}" = "true" ]; then
+                docker manifest create ${DOCKERHUB_REPO}:latest \
+                  ${DOCKERHUB_REPO}:nightly-amd64-${DATE} \
+                  ${DOCKERHUB_REPO}:nightly-arm64-${DATE} || echo "Failed to create Docker Hub latest manifest"
+                docker manifest push ${DOCKERHUB_REPO}:latest || echo "Failed to push Docker Hub latest manifest"
+
+                # Create Podman latest manifest
+                docker manifest create ${DOCKERHUB_REPO}:podman-latest \
+                  ${DOCKERHUB_REPO}:podman-nightly-amd64-${DATE} \
+                  ${DOCKERHUB_REPO}:podman-nightly-arm64-${DATE} || echo "Failed to create Docker Hub Podman latest manifest"
+                docker manifest push ${DOCKERHUB_REPO}:podman-latest || echo "Failed to push Docker Hub Podman latest manifest"
+              fi
             fi
-            
+
           elif [ "${{ inputs.tag-strategy }}" = "release" ]; then
             
             # GHCR Manifests

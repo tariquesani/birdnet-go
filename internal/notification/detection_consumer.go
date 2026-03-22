@@ -46,14 +46,28 @@ func (c *DetectionNotificationConsumer) SupportsBatching() bool {
 }
 
 func (c *DetectionNotificationConsumer) ProcessDetectionEvent(event events.DetectionEvent) error {
+	c.logger.Debug("processing detection event",
+		logger.String("operation", "process_detection_event"),
+		logger.String("species", event.GetSpeciesName()),
+		logger.Float64("confidence", event.GetConfidence()),
+		logger.Bool("is_new_species", event.IsNewSpecies()),
+		logger.Int("days_since_first_seen", event.GetDaysSinceFirstSeen()))
+
 	// When the alert engine is active, it handles detection notifications via
 	// configurable rules. Skip the hardcoded new-species gate, confidence
 	// threshold, and cooldown logic to avoid duplicate notifications.
 	if IsAlertEngineActive() {
+		c.logger.Debug("skipping detection: alert engine is active, deferring to alert rules",
+			logger.String("operation", "process_detection_event"),
+			logger.String("species", event.GetSpeciesName()))
 		return nil
 	}
 
 	if !event.IsNewSpecies() {
+		c.logger.Debug("skipping detection: not a new species",
+			logger.String("operation", "process_detection_event"),
+			logger.String("species", event.GetSpeciesName()),
+			logger.Int("days_since_first_seen", event.GetDaysSinceFirstSeen()))
 		return nil
 	}
 
@@ -92,6 +106,13 @@ func (c *DetectionNotificationConsumer) ProcessDetectionEvent(event events.Detec
 		return errors.New(err).Component("notification").Category(errors.CategoryProcessing).Context("operation", "save_notification").Build()
 	}
 
+	c.logger.Debug("broadcasting notification to push dispatcher",
+		logger.String("operation", "process_detection_event"),
+		logger.String("notification_id", notification.ID),
+		logger.String("species", event.GetSpeciesName()),
+		logger.String("type", string(notification.Type)),
+		logger.String("priority", string(notification.Priority)))
+
 	c.service.broadcast(notification)
 
 	// Record cooldown after successful notification
@@ -100,6 +121,7 @@ func (c *DetectionNotificationConsumer) ProcessDetectionEvent(event events.Detec
 	}
 
 	c.logger.Info("created new species notification",
+		logger.String("operation", "process_detection_event"),
 		logger.String("species", event.GetSpeciesName()),
 		logger.Float64("confidence", event.GetConfidence()),
 		logger.String("location", event.GetLocation()))

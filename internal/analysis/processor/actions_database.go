@@ -5,16 +5,13 @@ package processor
 
 import (
 	"context"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/detection"
-	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/events"
 	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/myaudio"
@@ -100,7 +97,17 @@ func (a *DatabaseAction) ExecuteContext(ctx context.Context, _ any) error {
 				logger.String("operation", "database_save_repository"))
 			return err
 		}
-		// Note: a.Result.ID is updated by Repo.Save()
+		// Repo.Save() updates a.Result.ID internally via result.ID = note.ID.
+		// Defensive check: warn if ID is unexpectedly 0 after a successful save.
+		// This aids diagnosis of GitHub #2453 (MQTT detectionId always 0).
+		if a.Result.ID == 0 {
+			GetLogger().Warn("Detection ID is 0 after successful Repo.Save(), downstream actions will not have a valid ID",
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.String("species", a.Result.Species.CommonName),
+				logger.String("scientific_name", a.Result.Species.ScientificName),
+				logger.String("operation", "database_save_id_check"))
+		}
 	} else {
 		// Legacy path: Use datastore.Interface directly
 		// Convert Result to Note for GORM persistence
@@ -236,19 +243,6 @@ func (a *DatabaseAction) ExecuteContext(ctx context.Context, _ any) error {
 	}
 
 	return nil
-}
-
-// isEOFError checks if an error is an EOF error using both precise matching and string fallback
-func isEOFError(err error) bool {
-	if err == nil {
-		return false
-	}
-	// Check for specific EOF errors first
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	// Fall back to string matching for wrapped or custom EOF errors
-	return strings.Contains(strings.ToLower(err.Error()), "eof")
 }
 
 // shouldSuppressNewSpeciesNotification checks if a new species notification should be suppressed.

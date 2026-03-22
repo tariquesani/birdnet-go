@@ -409,10 +409,25 @@ func (s *Service) broadcast(notification *Notification) {
 	s.subscribersMu.Lock()
 	defer s.subscribersMu.Unlock()
 
+	if len(s.subscribers) == 0 {
+		s.logger.Info("broadcast has no subscribers (push dispatcher may not be running)",
+			logger.String("operation", "broadcast"),
+			logger.String("notification_id", notification.ID),
+			logger.String("type", string(notification.Type)))
+	}
+
 	s.logBroadcastStart(notification)
 	activeSubscribers, stats := s.processSubscribers(notification)
 	s.subscribers = activeSubscribers
 	s.logBroadcastCompletion(notification, stats, len(activeSubscribers))
+
+	if stats.failed > 0 {
+		s.logger.Warn("some subscribers failed to receive notification",
+			logger.String("operation", "broadcast"),
+			logger.String("notification_id", notification.ID),
+			logger.Int("failed_count", stats.failed),
+			logger.Int("success_count", stats.success))
+	}
 }
 
 // logBroadcastStart logs the start of a broadcast operation.

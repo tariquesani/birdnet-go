@@ -13,6 +13,7 @@ import (
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/logger"
+	"github.com/tphakala/birdnet-go/internal/mqtt"
 	"github.com/tphakala/birdnet-go/internal/privacy"
 )
 
@@ -140,38 +141,28 @@ func (a *BirdWeatherAction) Execute(_ context.Context, data any) error {
 	return nil
 }
 
-// Execute sends the note to the MQTT broker
+// Execute sends the note to the MQTT broker.
+// Transient connection errors (EOF, not connected) are logged as warnings and
+// do NOT fail the CompositeAction — the detection is already saved to the database.
+// This eliminates the TOCTOU race at Layer 2 (GitHub #2397).
 func (a *MqttAction) Execute(_ context.Context, data any) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Rely on background reconnect; fail action if not currently connected.
-	if !a.MqttClient.IsConnected() {
-		// Log slightly differently to indicate it's waiting for background reconnect
-		GetLogger().Warn("MQTT client not connected, skipping publish",
-			logger.String("component", "analysis.processor.actions"),
-			logger.String("detection_id", a.CorrelationID),
-			logger.String("species", a.Result.Species.CommonName),
-			logger.String("scientific_name", a.Result.Species.ScientificName),
-			logger.Float64("confidence", a.Result.Confidence),
-			logger.String("operation", "mqtt_connection_check"),
-			logger.String("status", "waiting_reconnect"))
-		// MQTT connection failures are retryable because:
-		// - The MQTT client has automatic reconnection logic
-		// - Connection may be temporarily lost due to network issues
-		// - Broker may be temporarily unavailable
-		// The job queue retry mechanism complements the client's own reconnection
-		return errors.Newf("MQTT client not connected").
-			Component("analysis.processor").
-			Category(errors.CategoryMQTTConnection).
-			Context("operation", "mqtt_publish").
-			Context("integration", "mqtt").
-			Context("retryable", true). // Connection issues are retryable
-			Build()
-	}
+	// NOTE: We intentionally do NOT pre-check IsConnected() here.
+	// The check-then-use pattern is the core of the TOCTOU race (GitHub #2397).
+	// Instead, we attempt the publish directly and handle errors gracefully.
+	// The Publish() method returns a clear error if the client is disconnected.
 
 	// Check event frequency (supports scientific name lookup)
 	if !a.EventTracker.TrackEventWithNames(a.Result.Species.CommonName, a.Result.Species.ScientificName, MQTTPublish) {
+		return nil
+	}
+
+	// Early check if MQTT is still enabled in settings.
+	// Supports hot-reload: disabling MQTT in the UI takes effect immediately,
+	// even for actions already queued. Matches BirdWeatherAction pattern.
+	if !a.Settings.Realtime.MQTT.Enabled {
 		return nil
 	}
 
@@ -229,17 +220,32 @@ func (a *MqttAction) Execute(_ context.Context, data any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), MQTTPublishTimeout)
 	defer cancel()
 
-	// Publish the note to the MQTT broker
+	// Publish the note to the MQTT broker.
+	// The detection is already saved to the database (CompositeAction order: DB -> SSE -> MQTT).
+	// Transient connection errors are non-fatal — we log a warning and return nil to avoid
+	// failing the CompositeAction and generating noisy Sentry events (GitHub #2397).
 	err = a.MqttClient.Publish(ctx, a.Settings.Realtime.MQTT.Topic, string(noteJson))
 	if err != nil {
-		// Log the error with retry information if retries are enabled
-		// Sanitize error before logging
 		sanitizedErr := privacy.WrapError(err)
+		isConnErr := mqtt.IsTransientConnectionError(err)
 
-		// Check if this is an EOF error which indicates connection was closed unexpectedly
-		// This is a common issue with MQTT brokers and should be treated as retryable
-		isEOFErr := isEOFError(err)
+		if isConnErr {
+			// Transient connection error — detection is safe in DB, downgrade to warning.
+			// This is the key fix for GitHub #2397: the TOCTOU race between IsConnected()
+			// and Publish() produces these errors. Since the detection is persisted,
+			// a missed MQTT notification is not data loss.
+			GetLogger().Warn("MQTT publish skipped due to transient connection issue (detection saved to database)",
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Error(sanitizedErr),
+				logger.String("species", a.Result.Species.CommonName),
+				logger.Float64("confidence", a.Result.Confidence),
+				logger.String("topic", a.Settings.Realtime.MQTT.Topic),
+				logger.String("operation", "mqtt_publish_transient_skip"))
+			return nil // Non-fatal: don't fail the CompositeAction
+		}
 
+		// Non-transient error (config issue, JSON error, etc.) — this is a real problem
 		GetLogger().Error("Failed to publish to MQTT",
 			logger.String("component", "analysis.processor.actions"),
 			logger.String("detection_id", a.CorrelationID),
@@ -250,22 +256,18 @@ func (a *MqttAction) Execute(_ context.Context, data any) error {
 			logger.String("clip_name", a.Result.ClipName),
 			logger.String("topic", a.Settings.Realtime.MQTT.Topic),
 			logger.Bool("retry_enabled", a.RetryConfig.Enabled),
-			logger.Bool("is_eof_error", isEOFErr),
 			logger.String("operation", "mqtt_publish"))
-		// Publish MQTT publish failed alert event for non-EOF errors
-		if !isEOFErr {
-			alerting.TryPublish(&alerting.AlertEvent{
-				ObjectType: alerting.ObjectTypeIntegration,
-				EventName:  alerting.EventMQTTPublishFailed,
-				Properties: map[string]any{
-					alerting.PropertyBroker: a.Settings.Realtime.MQTT.Broker,
-					alerting.PropertyError:  sanitizedErr.Error(),
-				},
-			})
-		}
 
-		// Enhance error context with EOF detection
-		enhancedErr := errors.New(err).
+		alerting.TryPublish(&alerting.AlertEvent{
+			ObjectType: alerting.ObjectTypeIntegration,
+			EventName:  alerting.EventMQTTPublishFailed,
+			Properties: map[string]any{
+				alerting.PropertyBroker: a.Settings.Realtime.MQTT.Broker,
+				alerting.PropertyError:  sanitizedErr.Error(),
+			},
+		})
+
+		return errors.New(err).
 			Component("analysis.processor").
 			Category(errors.CategoryMQTTPublish).
 			Context("operation", "mqtt_publish").
@@ -274,11 +276,8 @@ func (a *MqttAction) Execute(_ context.Context, data any) error {
 			Context("topic", a.Settings.Realtime.MQTT.Topic).
 			Context("clip_name", a.Result.ClipName).
 			Context("integration", "mqtt").
-			Context("retryable", true). // MQTT publish failures are typically retryable
-			Context("is_eof_error", isEOFErr).
+			Context("retryable", true).
 			Build()
-
-		return enhancedErr
 	}
 
 	if a.Settings.Debug {

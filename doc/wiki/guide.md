@@ -437,6 +437,7 @@ birdnet [command] [flags]
 
 Many configuration options can be overridden via command-line flags (e.g., `--threshold 0.7`, `--locale fr`). Run `birdnet [command] --help` to see all available flags for a specific command. Some common global flags include:
 
+- `-c, --config`: Path to a custom configuration file (overrides default location).
 - `-d, --debug`: Enable debug output.
 - `-s, --sensitivity`: Set sigmoid sensitivity (0.0 to 1.5).
 - `-t, --threshold`: Set confidence threshold (0.1 to 1.0).
@@ -444,6 +445,29 @@ Many configuration options can be overridden via command-line flags (e.g., `--th
 - `--locale`: Set language for labels (e.g., `en-us`, `de`).
 - `--latitude`, `--longitude`: Set location coordinates.
 - `--overlap`: Set analysis overlap (0.0 to 2.9).
+
+#### Using a Custom Configuration File
+
+By default, BirdNET-Go looks for `config.yaml` in the [default configuration locations](#configuration-file-locations) for your operating system. You can override this with the `--config` or `-c` flag to use a configuration file at any path:
+
+```bash
+# Use a specific config file
+birdnet serve --config /path/to/my-config.yaml
+
+# Short form
+birdnet serve -c /path/to/my-config.yaml
+
+# Equals syntax
+birdnet serve --config=/path/to/my-config.yaml
+```
+
+This is useful for:
+
+- **Running multiple instances** with different configurations (e.g., different audio sources or detection thresholds) on the same host.
+- **Container deployments** where the config file is mounted at a non-standard path.
+- **Testing** with scenario-specific configurations.
+
+> **Note:** If the specified config file does not exist, BirdNET-Go will exit with an error rather than creating a default configuration at that path.
 
 ### Supported Languages for Species Labels
 
@@ -2089,6 +2113,105 @@ Each service has its own URL format. Common examples:
 
 For complete URL format documentation, see the [Shoutrrr documentation](https://containrrr.dev/shoutrrr/v0.8/services/overview/).
 
+###### Discord Setup Guide
+
+Discord is one of the most popular notification targets. Here's how to set it up:
+
+**Step 1: Create a Discord Webhook**
+
+1. Open your Discord server
+2. Go to **Server Settings** → **Integrations** → **Webhooks**
+3. Click **New Webhook**
+4. Choose the channel where you want notifications to appear
+5. Copy the webhook URL — it looks like: `https://discord.com/api/webhooks/1234567890/abcDEFghiJKLmnoPQRstu`
+
+**Step 2: Convert to Shoutrrr URL Format**
+
+The Discord webhook URL needs to be converted to Shoutrrr's format:
+
+```
+Discord webhook:  https://discord.com/api/webhooks/{webhook_id}/{webhook_token}
+Shoutrrr format:  discord://{webhook_token}@{webhook_id}
+```
+
+For example:
+```
+https://discord.com/api/webhooks/1234567890/abcDEFghiJKLmnoPQRstu
+→ discord://abcDEFghiJKLmnoPQRstu@1234567890
+```
+
+**Step 3: Configure in BirdNET-Go**
+
+Via the web UI:
+1. Go to **Settings** → **Notifications** → **Channels**
+2. Click **Add Provider**
+3. Set type to **Shoutrrr**, enter the `discord://...` URL
+4. Make sure filter types include **detection** and **warning**
+5. Click **Save**
+
+Or via `config.yaml`:
+
+```yaml
+notification:
+  push:
+    enabled: true
+    providers:
+      - type: shoutrrr
+        enabled: true
+        name: "discord"
+        urls:
+          - "discord://<webhook_token>@<webhook_id>"
+        timeout: 10s
+        filter:
+          types: ["detection", "warning"]
+```
+
+**Discord Rich Embeds with Thumbnails**
+
+For rich notifications with bird images, species fields, and color-coded embeds, use the **webhook provider** instead of Shoutrrr. This sends Discord's native embed format directly:
+
+```yaml
+notification:
+  push:
+    enabled: true
+    providers:
+      - type: webhook
+        enabled: true
+        name: "discord-rich"
+        endpoints:
+          - url: "https://discord.com/api/webhooks/<id>/<token>"
+            method: POST
+            headers:
+              Content-Type: "application/json"
+            timeout: 10s
+        filter:
+          types: ["detection"]
+        template: >-
+          {"embeds":[{"title":"{{.Title}}",
+          "description":"{{.Message}}",
+          "color":3066993,
+          "thumbnail":{"url":"{{index .Metadata `bg_image_url`}}"},
+          "fields":[
+          {"name":"Species","value":"{{index .Metadata `species`}}","inline":true},
+          {"name":"Confidence","value":"{{index .Metadata `bg_confidence_percent`}}%","inline":true},
+          {"name":"Location","value":"{{index .Metadata `bg_location`}}","inline":true}],
+          "footer":{"text":"BirdNET-Go"}}]}
+```
+
+This produces Discord messages with:
+- Bird species thumbnail image
+- Green color bar (color code `3066993` = green; use `15158332` for red, `3447003` for blue)
+- Species name, confidence, and location as inline fields
+
+> **Note**: The `bg_*` metadata fields (bird image URL, confidence, location, etc.) are populated for detection notifications. See [template variables](#available-template-fields) below for the full list.
+
+**Troubleshooting Discord**
+
+- **Notifications not arriving?** Make sure push notifications are enabled and the filter types include `detection`. New species detections use notification type `detection`.
+- **"Test Provider" works but real detections don't?** Check that the daylight filter isn't blocking detections for nocturnal species during daytime (Settings → Detection Filters).
+- **Settings lost after restart?** Ensure the config file is writable and the settings were saved (check for a success toast in the web UI).
+- **Empty thumbnail in rich embeds?** The `bg_image_url` field requires the image provider cache to have fetched the species image. The first detection of a species may not have an image immediately.
+
 ##### 2. Webhook (Custom HTTP)
 
 The webhook provider sends notifications as HTTP requests to custom endpoints, ideal for integrating with your own services, APIs, or automation platforms.
@@ -2180,7 +2303,24 @@ Available template fields:
 - `{{.Message}}` - Notification message
 - `{{.Component}}` - Component that generated the notification
 - `{{.Timestamp}}` - ISO 8601 timestamp
-- `{{.Metadata.key}}` - Any metadata field (e.g., confidence, species)
+- `{{index .Metadata "key"}}` - Any metadata field (use backticks inside YAML: `` `key` ``)
+
+**Detection metadata fields** (available for bird detection notifications):
+
+| Template Syntax | Description |
+|-----------------|-------------|
+| `{{index .Metadata "species"}}` | Bird common name |
+| `{{index .Metadata "scientific_name"}}` | Scientific name |
+| `{{index .Metadata "confidence"}}` | Confidence (0.0-1.0) |
+| `{{index .Metadata "bg_image_url"}}` | Bird species thumbnail URL |
+| `{{index .Metadata "bg_confidence_percent"}}` | Confidence as percentage (e.g., "99") |
+| `{{index .Metadata "bg_detection_time"}}` | Detection time (e.g., "14:30:45") |
+| `{{index .Metadata "bg_detection_date"}}` | Detection date (e.g., "2026-03-21") |
+| `{{index .Metadata "bg_detection_id"}}` | Database detection ID |
+| `{{index .Metadata "bg_detection_url"}}` | Full URL to detection in web UI |
+| `{{index .Metadata "bg_location"}}` | Formatted coordinates |
+| `{{index .Metadata "bg_latitude"}}` | GPS latitude |
+| `{{index .Metadata "bg_longitude"}}` | GPS longitude |
 
 ##### 3. Script (Custom Scripts)
 

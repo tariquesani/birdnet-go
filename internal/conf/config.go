@@ -1459,6 +1459,10 @@ type AlertSettings struct {
 }
 
 // settingsInstance is the current settings instance
+// ConfigPath allows overriding the config file path via --config CLI flag.
+// Must be set before the first call to Setting() or Load().
+var ConfigPath string
+
 var (
 	settingsInstance *Settings
 	once             sync.Once
@@ -1629,7 +1633,6 @@ func Load() (*Settings, error) {
 
 // initViper initializes viper with default values and reads the configuration file.
 func initViper() error {
-	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 
 	// Configure environment variable support
@@ -1639,18 +1642,56 @@ func initViper() error {
 		GetLogger().Warn("Environment variable configuration warning", logger.Error(err))
 	}
 
-	// Get OS specific config paths
-	configPaths, err := GetDefaultConfigPaths()
-	if err != nil {
-		return errors.New(err).
-			Category(errors.CategoryConfiguration).
-			Context("operation", "get-config-paths").
-			Build()
+	// Resolve effective config path. ConfigPath is the explicit override;
+	// fall back to scanning os.Args if it wasn't set yet (e.g., called
+	// before main parses args). Use a local variable to avoid mutating
+	// package-global state from the fallback parser.
+	effectiveConfigPath := ConfigPath
+	configFlagPresent := ConfigPath != ""
+	if !configFlagPresent {
+		for i, arg := range os.Args {
+			if (arg == "--config" || arg == "-c") && i+1 < len(os.Args) {
+				configFlagPresent = true
+				effectiveConfigPath = os.Args[i+1]
+				break
+			}
+			if val, found := strings.CutPrefix(arg, "--config="); found {
+				configFlagPresent = true
+				effectiveConfigPath = val
+				break
+			}
+			if val, found := strings.CutPrefix(arg, "-c="); found {
+				configFlagPresent = true
+				effectiveConfigPath = val
+				break
+			}
+		}
 	}
 
-	// Assign config paths to Viper
-	for _, path := range configPaths {
-		viper.AddConfigPath(path)
+	// Reject empty config path when the flag was explicitly provided
+	if configFlagPresent && effectiveConfigPath == "" {
+		return fmt.Errorf("--config flag requires a non-empty file path")
+	}
+
+	// If a custom config path was specified via --config, use it directly
+	if effectiveConfigPath != "" {
+		viper.SetConfigFile(effectiveConfigPath)
+	} else {
+		viper.SetConfigName("config")
+
+		// Get OS specific config paths
+		configPaths, err := GetDefaultConfigPaths()
+		if err != nil {
+			return errors.New(err).
+				Category(errors.CategoryConfiguration).
+				Context("operation", "get-config-paths").
+				Build()
+		}
+
+		// Assign config paths to Viper
+		for _, path := range configPaths {
+			viper.AddConfigPath(path)
+		}
 	}
 
 	// Set default values for each configuration parameter
@@ -1658,14 +1699,26 @@ func initViper() error {
 	setDefaultConfig()
 
 	// Read configuration file
-	err = viper.ReadInConfig()
+	err := viper.ReadInConfig()
 	if err != nil {
+		// When an explicit config path was given, any read error is fatal —
+		// don't fall back to creating a default config elsewhere.
+		if effectiveConfigPath != "" {
+			return errors.New(err).
+				Category(errors.CategoryConfiguration).
+				Context("operation", "read-config-file").
+				Context("config_path", effectiveConfigPath).
+				Build()
+		}
+
+		// For default path search: ConfigFileNotFoundError means no config
+		// exists yet, so create one with defaults.
 		var configFileNotFoundError viper.ConfigFileNotFoundError
 		if errors.As(err, &configFileNotFoundError) {
-			// Config file not found, create config with defaults
 			return createDefaultConfig()
 		}
-		// Report critical config file read errors
+
+		// Other errors (parse failures, permission issues) are fatal.
 		return errors.New(err).
 			Category(errors.CategoryFileIO).
 			Context("operation", "read-config-file").
