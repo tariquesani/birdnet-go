@@ -33,7 +33,9 @@
     shouldDedup,
     promoteFromQueue,
     nextYSlot,
+    computeWallClockAtPlayhead,
     STALE_DEDUP_PRUNE_SECONDS,
+    LABEL_LEAD_IN_SECONDS,
   } from '$lib/utils/detectionOverlay';
 
   const logger = loggers.audio;
@@ -326,6 +328,10 @@
             spectro.disconnect();
             return;
           }
+          startHeartbeat(activeStreamToken!);
+          if (activeSourceId) {
+            connectDetectionStream(activeSourceId);
+          }
           isStreaming = true;
           isConnecting = false;
         });
@@ -340,8 +346,7 @@
               buffered: describeBuffered(audioElement),
               currentTime: audioElement?.currentTime?.toFixed(3),
             });
-            isStreaming = false;
-            isConnecting = false;
+            stopStream();
           } else {
             // Non-fatal errors — log for debugging buffer issues
             const info: Record<string, unknown> = {
@@ -393,6 +398,10 @@
           spectro.disconnect();
           return;
         }
+        startHeartbeat(activeStreamToken!);
+        if (activeSourceId) {
+          connectDetectionStream(activeSourceId);
+        }
         isStreaming = true;
         isConnecting = false;
       } else {
@@ -403,11 +412,6 @@
 
       // Guard: abort may have fired during async setup
       if (signal.aborted) return;
-
-      startHeartbeat(activeStreamToken!);
-      if (activeSourceId) {
-        connectDetectionStream(activeSourceId);
-      }
     } catch (error) {
       if (signal.aborted) return;
       connectionError = t('spectrogram.error.connectionFailed');
@@ -466,7 +470,7 @@
           slotCounter = next;
           labelQueue.push({
             text: det.species,
-            firstDetected: (det.audioCapturedAt ?? det.firstDetected) - 1.5,
+            firstDetected: (det.audioCapturedAt ?? det.firstDetected) - LABEL_LEAD_IN_SECONDS,
             ySlot: slot,
           });
         }
@@ -530,6 +534,7 @@
 
     activeStreamToken = null;
     activeSourceId = null;
+    isConnecting = false;
     isStreaming = false;
   }
 
@@ -689,21 +694,23 @@
     return () => globalThis.clearInterval(interval);
   });
 
-  // Promote queued detection labels when playhead catches up
+  // Promote queued detection labels when playhead catches up.
+  // Prefers hls.playingDate (accurate), falls back to seekable-based
+  // estimate for native HLS (Safari/iOS).
   $effect(() => {
-    if (!audioElement || !hls) return;
+    if (!audioElement) return;
 
     const interval = globalThis.setInterval(() => {
-      if (!audioElement || !hls) return;
+      if (!audioElement) return;
 
       const now = globalThis.performance.now();
       const nowUnix = Date.now() / 1000;
 
-      // Get wall-clock time at playhead from HLS program date time tags.
-      // FFmpeg embeds #EXT-X-PROGRAM-DATE-TIME in the playlist; hls.js
-      // interpolates the exact Date for the current playback position.
-      const playingDate = hls.playingDate;
-      const wallClockAtPlayhead = playingDate ? playingDate.getTime() / 1000 : 0;
+      const wallClockAtPlayhead = computeWallClockAtPlayhead(
+        audioElement,
+        hls?.playingDate ?? null,
+        nowUnix
+      );
 
       // Update reactive state for debug display in SpectrogramCanvas
       if (wallClockAtPlayhead > 0) {
@@ -794,6 +801,9 @@
         onclick={toggleFullscreen}
         class="inline-flex items-center justify-center rounded-lg p-1.5 text-[var(--color-base-content)]/70 transition-colors hover:bg-[var(--color-base-200)] hover:text-[var(--color-base-content)]"
         aria-label={isFullscreen
+          ? t('spectrogram.page.exitFullscreen')
+          : t('spectrogram.page.enterFullscreen')}
+        title={isFullscreen
           ? t('spectrogram.page.exitFullscreen')
           : t('spectrogram.page.enterFullscreen')}
       >
