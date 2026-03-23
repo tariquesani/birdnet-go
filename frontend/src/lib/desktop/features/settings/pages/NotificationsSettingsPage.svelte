@@ -1325,7 +1325,10 @@
         <a
           href="/ui/system/database"
           class="underline font-medium ml-1 hover:opacity-80"
-          onclick={(e: MouseEvent) => { e.preventDefault(); navigation.navigate('/ui/system/database'); }}
+          onclick={(e: MouseEvent) => {
+            e.preventDefault();
+            navigation.navigate('/ui/system/database');
+          }}
         >
           {t('settings.alerts.v2RequiredLink')}
         </a>
