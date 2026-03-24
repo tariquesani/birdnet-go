@@ -86,6 +86,7 @@
   import { formatLocalDateTime } from '$lib/utils/date';
   import { schemaObjectTypeLabel } from '$lib/utils/alertSchema';
   import { translateField } from '$lib/utils/notifications';
+  import { navigation } from '$lib/stores/navigation.svelte';
 
   const logger = loggers.settings;
 
@@ -1321,6 +1322,16 @@
     <ErrorAlert type="warning" className="mb-4">
       {#snippet children()}
         {t('settings.alerts.v2Required')}
+        <a
+          href="/ui/system/database"
+          class="underline font-medium ml-1 hover:opacity-80"
+          onclick={(e: MouseEvent) => {
+            e.preventDefault();
+            navigation.navigate('/ui/system/database');
+          }}
+        >
+          {t('settings.alerts.v2RequiredLink')}
+        </a>
       {/snippet}
     </ErrorAlert>
   {/if}

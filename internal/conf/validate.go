@@ -16,6 +16,7 @@ import (
 
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/logger"
+	"github.com/tphakala/birdnet-go/internal/templatefuncs"
 )
 
 // MinSoundLevelInterval is the minimum sound level interval in seconds to prevent excessive CPU usage
@@ -419,9 +420,11 @@ func ValidateWebhookProvider(p *PushProviderConfig) ValidationResult {
 		return result
 	}
 
-	// Validate custom template if specified
+	// Validate custom template if specified.
+	// Use the shared templatefuncs.Funcs so Parse() accepts custom functions
+	// like "title" or "formatTime".
 	if p.Template != "" {
-		if _, err := template.New("validation").Parse(p.Template); err != nil {
+		if _, err := template.New("validation").Funcs(templatefuncs.Funcs).Parse(p.Template); err != nil {
 			result.Valid = false
 			result.Errors = append(result.Errors,
 				fmt.Sprintf("webhook provider '%s': invalid template syntax: %v", p.Name, err))

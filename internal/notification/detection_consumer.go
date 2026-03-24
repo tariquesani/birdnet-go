@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"sync"
-	"text/template"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/conf"
@@ -261,7 +260,7 @@ func RenderTemplate(name, tmplStr string, data any) (string, error) {
 }
 
 func renderTemplate(name, tmplStr string, data any) (string, error) {
-	tmpl, err := template.New(name).Parse(tmplStr)
+	tmpl, err := newTemplateWithFuncs(name).Parse(tmplStr)
 	if err != nil {
 		return "", errors.New(err).Component("notification").Category(errors.CategoryProcessing).Context("operation", "parse_template").Build()
 	}
