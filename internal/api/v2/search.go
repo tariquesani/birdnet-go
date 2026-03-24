@@ -124,21 +124,22 @@ func (c *Controller) logValidatedRequest(path, ip string, req *SearchRequest) {
 // buildSearchFilters creates the datastore search filters from the request.
 func (c *Controller) buildSearchFilters(req *SearchRequest, ctxTimeout context.Context) datastore.SearchFilters {
 	return datastore.SearchFilters{
-		Species:        req.Species,
-		DateStart:      req.DateStart,
-		DateEnd:        req.DateEnd,
-		ConfidenceMin:  req.ConfidenceMin,
-		ConfidenceMax:  req.ConfidenceMax,
-		VerifiedOnly:   req.VerifiedStatus == "verified",
-		UnverifiedOnly: req.VerifiedStatus == "unverified",
-		LockedOnly:     req.LockedStatus == "locked",
-		UnlockedOnly:   req.LockedStatus == "unlocked",
-		Device:         req.DeviceFilter,
-		TimeOfDay:      req.TimeOfDay,
-		Page:           req.Page,
-		PerPage:        defaultPerPage,
-		SortBy:         req.SortBy,
-		Ctx:            ctxTimeout,
+		Species:           req.Species,
+		DateStart:         req.DateStart,
+		DateEnd:           req.DateEnd,
+		ConfidenceMin:     req.ConfidenceMin,
+		ConfidenceMax:     req.ConfidenceMax,
+		VerifiedOnly:      req.VerifiedStatus == "verified",
+		UnverifiedOnly:    req.VerifiedStatus == "unverified",
+		FalsePositiveOnly: req.VerifiedStatus == "false_positive",
+		LockedOnly:        req.LockedStatus == "locked",
+		UnlockedOnly:      req.LockedStatus == "unlocked",
+		Device:            req.DeviceFilter,
+		TimeOfDay:         req.TimeOfDay,
+		Page:              req.Page,
+		PerPage:           defaultPerPage,
+		SortBy:            req.SortBy,
+		Ctx:               ctxTimeout,
 	}
 }
 
@@ -224,12 +225,17 @@ func (c *Controller) validateSearchDates(path, ip string, req *SearchRequest) er
 
 // validateSearchStatusEnums validates VerifiedStatus and LockedStatus.
 func (c *Controller) validateSearchStatusEnums(path, ip string, req *SearchRequest) error {
-	validVerifiedStatus := map[string]bool{QueryValueAny: true, "verified": true, "unverified": true}
+	validVerifiedStatus := map[string]bool{
+		QueryValueAny:    true,
+		"verified":       true,
+		"unverified":     true,
+		"false_positive": true,
+	}
 	if req.VerifiedStatus == "" {
 		req.VerifiedStatus = QueryValueAny
 	} else if !validVerifiedStatus[req.VerifiedStatus] {
 		c.logErrorIfEnabled("Invalid verified status parameter", logger.String("verifiedStatus", req.VerifiedStatus), logger.String("path", path), logger.String("ip", ip))
-		return fmt.Errorf("invalid verified status '%s'. Use 'any', 'verified', or 'unverified'", req.VerifiedStatus)
+		return fmt.Errorf("invalid verified status '%s'. Use 'any', 'verified', 'unverified', or 'false_positive'", req.VerifiedStatus)
 	}
 
 	validLockedStatus := map[string]bool{QueryValueAny: true, "locked": true, "unlocked": true}
