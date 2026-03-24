@@ -1988,21 +1988,22 @@ func (ds *DataStore) CountHourlyDetections(date, hour string, duration int) (int
 
 // SearchFilters defines parameters for filtering detection records
 type SearchFilters struct {
-	Species        string
-	DateStart      string
-	DateEnd        string
-	ConfidenceMin  float64
-	ConfidenceMax  float64
-	VerifiedOnly   bool
-	UnverifiedOnly bool
-	LockedOnly     bool
-	UnlockedOnly   bool
-	Device         string
-	TimeOfDay      string // "any", "day", "night", "sunrise", "sunset"
-	Page           int
-	PerPage        int
-	SortBy         string
-	Ctx            context.Context // Add context for cancellation/timeout
+	Species           string
+	DateStart         string
+	DateEnd           string
+	ConfidenceMin     float64
+	ConfidenceMax     float64
+	VerifiedOnly      bool
+	UnverifiedOnly    bool
+	FalsePositiveOnly bool
+	LockedOnly        bool
+	UnlockedOnly      bool
+	Device            string
+	TimeOfDay         string // "any", "day", "night", "sunrise", "sunset"
+	Page              int
+	PerPage           int
+	SortBy            string
+	Ctx               context.Context // Add context for cancellation/timeout
 }
 
 // sanitise validates and normalises the search filters, returning an error for invalid combinations.
@@ -2026,8 +2027,18 @@ func (f *SearchFilters) sanitise() error {
 			Build()
 	}
 	// Validate mutually exclusive Verified flags
-	if f.VerifiedOnly && f.UnverifiedOnly {
-		return errors.Newf("verified_only and unverified_only cannot both be true").
+	verifiedFilterCount := 0
+	if f.VerifiedOnly {
+		verifiedFilterCount++
+	}
+	if f.UnverifiedOnly {
+		verifiedFilterCount++
+	}
+	if f.FalsePositiveOnly {
+		verifiedFilterCount++
+	}
+	if verifiedFilterCount > 1 {
+		return errors.Newf("verified_only, unverified_only, and false_positive_only are mutually exclusive").
 			Component("datastore").
 			Category(errors.CategoryValidation).
 			Build()
@@ -2081,6 +2092,8 @@ func applyCommonFilters(query *gorm.DB, filters *SearchFilters, ds *DataStore) *
 		// Handle NULL case explicitly for unverified
 		query = query.Where("(note_reviews.verified IS NULL OR (note_reviews.verified != ? AND note_reviews.verified != ?))",
 			string(entities.VerificationCorrect), string(entities.VerificationFalsePositive))
+	} else if filters.FalsePositiveOnly {
+		query = query.Where("note_reviews.verified = ?", string(entities.VerificationFalsePositive))
 	}
 
 	if filters.LockedOnly {

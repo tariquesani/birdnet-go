@@ -227,6 +227,9 @@ func getAppliedFilters(filters *SearchFilters) map[string]any {
 	if filters.UnverifiedOnly {
 		applied["unverified_only"] = filters.UnverifiedOnly
 	}
+	if filters.FalsePositiveOnly {
+		applied["false_positive_only"] = filters.FalsePositiveOnly
+	}
 	if filters.LockedOnly {
 		applied["locked_only"] = filters.LockedOnly
 	}

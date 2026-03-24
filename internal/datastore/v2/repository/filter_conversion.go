@@ -520,6 +520,9 @@ func ConvertSearchFilters(
 	} else if filters.UnverifiedOnly {
 		isReviewed := false
 		sf.IsReviewed = &isReviewed
+	} else if filters.FalsePositiveOnly {
+		verified := VerificationFilter(entities.VerificationFalsePositive)
+		sf.Verified = &verified
 	}
 
 	// Lock status

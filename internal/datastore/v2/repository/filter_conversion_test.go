@@ -850,6 +850,19 @@ func TestConvertSearchFilters(t *testing.T) {
 		assert.False(t, *result.IsReviewed)
 	})
 
+	t.Run("false positive only sets false_positive verification filter", func(t *testing.T) {
+		filters := &datastore.SearchFilters{
+			FalsePositiveOnly: true,
+		}
+
+		result, err := ConvertSearchFilters(ctx, filters, nil, tz)
+		require.NoError(t, err)
+
+		require.NotNil(t, result.Verified)
+		assert.Equal(t, VerificationFilter(entities.VerificationFalsePositive), *result.Verified)
+		assert.Nil(t, result.IsReviewed)
+	})
+
 	t.Run("locked only sets IsLocked true", func(t *testing.T) {
 		filters := &datastore.SearchFilters{
 			LockedOnly: true,
