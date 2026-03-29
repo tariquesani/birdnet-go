@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/conf"
@@ -16,6 +15,9 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
+
+// MySQL connection pool constants are defined in mysql_pool.go and shared
+// with the v2 store to keep both within MySQL's max_connections budget.
 
 // validTableNameRegex matches valid table names: alphanumeric, underscores, and dashes only
 var validTableNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -74,8 +76,29 @@ func (store *MySQLStore) Open() error {
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: gormLogger})
 	if err != nil {
 		GetLogger().Error("Failed to open MySQL database", logger.Error(err))
-		return fmt.Errorf("failed to open MySQL database: %w", err)
+		return errors.New(err).
+			Component("datastore").
+			Category(errors.CategoryDatabase).
+			Context("operation", "mysql_open").
+			Build()
 	}
+
+	// Configure connection pool for MySQL.
+	// Unlike SQLite which serializes with MaxOpenConns(1), MySQL handles
+	// concurrent connections natively. These settings prevent resource
+	// exhaustion while keeping warm connections for latency.
+	sqlDB, err := db.DB()
+	if err != nil {
+		return errors.New(err).
+			Component("datastore").
+			Category(errors.CategoryDatabase).
+			Context("operation", "get_underlying_sqldb").
+			Build()
+	}
+	sqlDB.SetMaxOpenConns(MySQLMaxOpenConns)
+	sqlDB.SetMaxIdleConns(MySQLMaxIdleConns)
+	sqlDB.SetConnMaxLifetime(MySQLConnMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(MySQLConnMaxIdleTime)
 
 	store.DB = db
 
@@ -195,8 +218,9 @@ func (store *MySQLStore) Optimize(ctx context.Context) error {
 
 		// Run OPTIMIZE TABLE
 		if err := store.DB.Exec(fmt.Sprintf("OPTIMIZE TABLE `%s`", table)).Error; err != nil {
-			// MySQL may return a note/warning for InnoDB tables, which is not an error
-			if !strings.Contains(err.Error(), "Table does not support optimize") {
+			// MySQL error 1031 (ER_ILLEGAL_HA) is returned for InnoDB tables
+			// that don't support OPTIMIZE TABLE -- this is expected, not an error.
+			if !isMySQLError(err, mysqlErrIllegalHA) {
 				optimizeLogger.Warn("Failed to optimize table",
 					logger.String("table", table),
 					logger.Error(err),

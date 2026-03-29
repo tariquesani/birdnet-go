@@ -4,3 +4,4 @@ Dockerfile
 .git
 .github
 .task
+.claude

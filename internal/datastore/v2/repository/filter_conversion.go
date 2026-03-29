@@ -514,13 +514,14 @@ func ConvertSearchFilters(
 	// Verification status
 	// VerifiedOnly: filter to detections with Verified = "correct"
 	// UnverifiedOnly: filter to detections with no review (IsReviewed = false)
-	if filters.VerifiedOnly {
+	switch {
+	case filters.VerifiedOnly:
 		verified := VerificationFilter(entities.VerificationCorrect)
 		sf.Verified = &verified
-	} else if filters.UnverifiedOnly {
+	case filters.UnverifiedOnly:
 		isReviewed := false
 		sf.IsReviewed = &isReviewed
-	} else if filters.FalsePositiveOnly {
+	case filters.FalsePositiveOnly:
 		verified := VerificationFilter(entities.VerificationFalsePositive)
 		sf.Verified = &verified
 	}

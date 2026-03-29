@@ -16,17 +16,26 @@ import (
 
 // MockDatastore implements datastore.Interface for testing
 type MockDatastore struct {
-	thresholds          map[string]*datastore.DynamicThreshold
-	getAllError         error
-	saveError           error
-	batchSaveError      error
-	deleteError         error
-	deleteExpiredError  error
-	updateExpiryError   error
-	deletedCount        int64
-	batchSaveCalled     bool
-	deleteExpiredCalled bool
-	getAllCalled        bool
+	thresholds                   map[string]*datastore.DynamicThreshold
+	getAllError                  error
+	saveError                    error
+	batchSaveError               error
+	deleteError                  error
+	deleteExpiredError           error
+	updateExpiryError            error
+	deletePerSpeciesErrors       map[string]error // per-species errors for DeleteDynamicThreshold
+	deleteEventsPerSpeciesErrors map[string]error // per-species errors for DeleteThresholdEvents
+	deleteAllThresholdsError     error            // error for DeleteAllDynamicThresholds
+	deleteAllEventsError         error            // error for DeleteAllThresholdEvents
+	deletedCount                 int64
+	batchSaveCalled              bool
+	deleteExpiredCalled          bool
+	getAllCalled                 bool
+	// Call counters to verify both delete paths are invoked even on error
+	deleteDynamicThresholdCalls int
+	deleteThresholdEventsCalls  int
+	deleteAllThresholdsCalls    int
+	deleteAllEventsCalls        int
 }
 
 // Implement all required methods from datastore.Interface
@@ -60,8 +69,8 @@ func (m *MockDatastore) GetLastDetections(int) ([]datastore.Note, error) {
 func (m *MockDatastore) GetAllDetectedSpecies() ([]datastore.Note, error) {
 	return make([]datastore.Note, 0), nil
 }
-func (m *MockDatastore) SearchNotes(string, bool, int, int) ([]datastore.Note, error) {
-	return make([]datastore.Note, 0), nil
+func (m *MockDatastore) SearchNotes(string, bool, int, int) ([]datastore.Note, int64, error) {
+	return make([]datastore.Note, 0), 0, nil
 }
 func (m *MockDatastore) SearchNotesAdvanced(*datastore.AdvancedSearchFilters) ([]datastore.Note, int64, error) {
 	return make([]datastore.Note, 0), 0, nil
@@ -106,10 +115,9 @@ func (m *MockDatastore) GetHourlyDetections(string, string, int, int, int) ([]da
 func (m *MockDatastore) CountSpeciesDetections(string, string, string, int) (int64, error) {
 	return 0, nil
 }
-func (m *MockDatastore) CountSearchResults(string) (int64, error) { return 0, nil }
-func (m *MockDatastore) Transaction(func(*gorm.DB) error) error   { return nil }
-func (m *MockDatastore) LockNote(string) error                    { return nil }
-func (m *MockDatastore) UnlockNote(string) error                  { return nil }
+func (m *MockDatastore) Transaction(func(*gorm.DB) error) error { return nil }
+func (m *MockDatastore) LockNote(string) error                  { return nil }
+func (m *MockDatastore) UnlockNote(string) error                { return nil }
 func (m *MockDatastore) GetNoteLock(string) (*datastore.NoteLock, error) {
 	return nil, datastore.ErrNoteLockNotFound
 }
@@ -193,6 +201,13 @@ func (m *MockDatastore) GetAllDynamicThresholds(limit ...int) ([]datastore.Dynam
 }
 
 func (m *MockDatastore) DeleteDynamicThreshold(speciesName string) error {
+	m.deleteDynamicThresholdCalls++
+	// Check per-species errors first
+	if m.deletePerSpeciesErrors != nil {
+		if err, ok := m.deletePerSpeciesErrors[speciesName]; ok {
+			return err
+		}
+	}
 	if m.deleteError != nil {
 		return m.deleteError
 	}
@@ -247,6 +262,10 @@ func (m *MockDatastore) BatchSaveDynamicThresholds(thresholds []datastore.Dynami
 
 // BG-59: Add new dynamic threshold methods
 func (m *MockDatastore) DeleteAllDynamicThresholds() (int64, error) {
+	m.deleteAllThresholdsCalls++
+	if m.deleteAllThresholdsError != nil {
+		return 0, m.deleteAllThresholdsError
+	}
 	count := int64(len(m.thresholds))
 	m.thresholds = make(map[string]*datastore.DynamicThreshold)
 	return count, nil
@@ -280,11 +299,21 @@ func (m *MockDatastore) GetRecentThresholdEvents(int) ([]datastore.ThresholdEven
 	return []datastore.ThresholdEvent{}, nil
 }
 
-func (m *MockDatastore) DeleteThresholdEvents(string) error {
+func (m *MockDatastore) DeleteThresholdEvents(speciesName string) error {
+	m.deleteThresholdEventsCalls++
+	if m.deleteEventsPerSpeciesErrors != nil {
+		if err, ok := m.deleteEventsPerSpeciesErrors[speciesName]; ok {
+			return err
+		}
+	}
 	return nil
 }
 
 func (m *MockDatastore) DeleteAllThresholdEvents() (int64, error) {
+	m.deleteAllEventsCalls++
+	if m.deleteAllEventsError != nil {
+		return 0, m.deleteAllEventsError
+	}
 	return 0, nil
 }
 
@@ -371,6 +400,7 @@ func createTestProcessor() *Processor {
 		Settings:          settings,
 		Ds:                mockDs,
 		DynamicThresholds: make(map[string]*DynamicThreshold),
+		pendingResets:     make(map[string]struct{}),
 	}
 
 	return p
@@ -660,5 +690,137 @@ func TestBatchSaveWithBaseThreshold(t *testing.T) {
 		savedThreshold := mockDs.thresholds["american crow"]
 		require.NotNil(t, savedThreshold)
 		assert.InDelta(t, 0.65, savedThreshold.BaseThreshold, 0.001, "Base threshold should match custom config")
+	})
+}
+
+// TestDrainPendingResetsRequeuesOnFailure tests that failed DB deletes during
+// drainPendingResets are requeued into pendingResets for the next cycle.
+func TestDrainPendingResetsRequeuesOnFailure(t *testing.T) {
+	t.Run("PerSpecies_FailedDeleteRequeues", func(t *testing.T) {
+		p := createTestProcessor()
+		mockDs := p.Ds.(*MockDatastore)
+
+		// Set up per-species delete error for "blue jay" only
+		dbErr := errors.Newf("database locked").Build()
+		mockDs.deletePerSpeciesErrors = map[string]error{
+			"blue jay": dbErr,
+		}
+
+		// Queue two species for reset
+		p.pendingResets["american crow"] = struct{}{}
+		p.pendingResets["blue jay"] = struct{}{}
+
+		p.drainPendingResets()
+
+		// "american crow" should have been deleted successfully (not requeued)
+		assert.NotContains(t, p.pendingResets, "american crow",
+			"Successfully deleted species should not be requeued")
+
+		// "blue jay" should be requeued because its delete failed
+		assert.Contains(t, p.pendingResets, "blue jay",
+			"Failed species should be requeued for retry")
+
+		// Both delete paths must be invoked for each species
+		assert.Equal(t, 2, mockDs.deleteDynamicThresholdCalls,
+			"DeleteDynamicThreshold should be called once per species")
+		assert.Equal(t, 2, mockDs.deleteThresholdEventsCalls,
+			"DeleteThresholdEvents should be called once per species")
+	})
+
+	t.Run("PerSpecies_EventsDeleteFailureAlsoRequeues", func(t *testing.T) {
+		p := createTestProcessor()
+		mockDs := p.Ds.(*MockDatastore)
+
+		// Threshold delete succeeds, but events delete fails
+		dbErr := errors.Newf("database locked").Build()
+		mockDs.deleteEventsPerSpeciesErrors = map[string]error{
+			"blue jay": dbErr,
+		}
+
+		p.pendingResets["blue jay"] = struct{}{}
+
+		p.drainPendingResets()
+
+		// "blue jay" should be requeued because events delete failed
+		assert.Contains(t, p.pendingResets, "blue jay",
+			"Species with failed events delete should be requeued")
+
+		// Both delete paths must be invoked even when only events fail
+		assert.Equal(t, 1, mockDs.deleteDynamicThresholdCalls,
+			"DeleteDynamicThreshold should be called even when events fail")
+		assert.Equal(t, 1, mockDs.deleteThresholdEventsCalls,
+			"DeleteThresholdEvents should be called even when threshold delete succeeds")
+	})
+
+	t.Run("PerSpecies_AllSucceed_NothingRequeued", func(t *testing.T) {
+		p := createTestProcessor()
+
+		// Queue species for reset, no errors configured
+		p.pendingResets["american crow"] = struct{}{}
+		p.pendingResets["blue jay"] = struct{}{}
+
+		p.drainPendingResets()
+
+		assert.Empty(t, p.pendingResets,
+			"No species should be requeued when all deletes succeed")
+	})
+
+	t.Run("ResetAll_FailedDeleteRequeues", func(t *testing.T) {
+		p := createTestProcessor()
+		mockDs := p.Ds.(*MockDatastore)
+
+		// Make delete-all-thresholds fail
+		dbErr := errors.Newf("database locked").Build()
+		mockDs.deleteAllThresholdsError = dbErr
+
+		p.pendingResetAll = true
+
+		p.drainPendingResets()
+
+		// pendingResetAll should be re-set because the delete-all failed
+		assert.True(t, p.pendingResetAll,
+			"pendingResetAll should be requeued when delete-all fails")
+
+		// Both delete-all paths must be invoked even when thresholds fail
+		assert.Equal(t, 1, mockDs.deleteAllThresholdsCalls,
+			"DeleteAllDynamicThresholds should be called")
+		assert.Equal(t, 1, mockDs.deleteAllEventsCalls,
+			"DeleteAllThresholdEvents should be called even when thresholds delete fails")
+	})
+
+	t.Run("ResetAll_EventsDeleteFailRequeues", func(t *testing.T) {
+		p := createTestProcessor()
+		mockDs := p.Ds.(*MockDatastore)
+
+		// Thresholds delete succeeds, events delete fails
+		dbErr := errors.Newf("database locked").Build()
+		mockDs.deleteAllEventsError = dbErr
+
+		p.pendingResetAll = true
+
+		p.drainPendingResets()
+
+		// pendingResetAll should be re-set because the events delete-all failed
+		assert.True(t, p.pendingResetAll,
+			"pendingResetAll should be requeued when events delete-all fails")
+
+		// Both delete-all paths must be invoked even when only events fail
+		assert.Equal(t, 1, mockDs.deleteAllThresholdsCalls,
+			"DeleteAllDynamicThresholds should be called even when events fail")
+		assert.Equal(t, 1, mockDs.deleteAllEventsCalls,
+			"DeleteAllThresholdEvents should be called even when thresholds delete succeeds")
+	})
+
+	t.Run("ResetAll_AllSucceed_NotRequeued", func(t *testing.T) {
+		p := createTestProcessor()
+
+		p.pendingResetAll = true
+
+		p.drainPendingResets()
+
+		assert.False(t, p.pendingResetAll,
+			"pendingResetAll should not be requeued when all deletes succeed")
+		assert.Empty(t, p.pendingResets,
+			"pendingResets should remain empty after successful reset-all")
 	})
 }

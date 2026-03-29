@@ -5,6 +5,7 @@
   import { api, ApiError } from '$lib/utils/api';
   import { toastActions } from '$lib/stores/toast';
   import { Bell, BellOff, XCircle, TriangleAlert, Info, Settings, Star } from '@lucide/svelte';
+  import { dropdown } from '$lib/utils/transitions';
   import { loggers } from '$lib/utils/logger';
   import { buildAppUrl } from '$lib/utils/urlHelpers';
   import { t } from '$lib/i18n';
@@ -234,6 +235,11 @@
       await api.put(`/api/v2/notifications/${notificationId}/read`);
       notifications = notifications.map(n => (n.id === notificationId ? { ...n, read: true } : n));
     } catch (error) {
+      // Treat 404 as success: notification was already deleted/expired server-side
+      if (error instanceof ApiError && error.status === 404) {
+        notifications = notifications.filter(n => n.id !== notificationId);
+        return;
+      }
       // Show user feedback for failed mark-as-read since this is a user action
       if (error instanceof ApiError) {
         toastActions.error(t('notifications.errors.markReadFailed'));
@@ -455,6 +461,8 @@
     <div
       bind:this={dropdownRef}
       id="notification-dropdown"
+      in:dropdown
+      out:dropdown={{ duration: 100 }}
       role={!loading && formattedNotifications.length > 0 ? 'menu' : undefined}
       class="notification-dropdown absolute top-full mt-2 w-80 sm:w-96 max-w-[calc(100vw-2rem)] max-h-128 bg-[var(--color-base-100)] rounded-lg shadow-xl border border-[var(--color-base-300)] overflow-hidden flex flex-col"
       style:z-index={DROPDOWN_Z_INDEX}

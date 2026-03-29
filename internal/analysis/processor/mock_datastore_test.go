@@ -168,8 +168,8 @@ func (m *ActionMockDatastore) GetLastDetections(_ int) ([]datastore.Note, error)
 func (m *ActionMockDatastore) GetAllDetectedSpecies() ([]datastore.Note, error) {
 	return nil, nil
 }
-func (m *ActionMockDatastore) SearchNotes(_ string, _ bool, _, _ int) ([]datastore.Note, error) {
-	return nil, nil
+func (m *ActionMockDatastore) SearchNotes(_ string, _ bool, _, _ int) ([]datastore.Note, int64, error) {
+	return nil, 0, nil
 }
 func (m *ActionMockDatastore) SearchNotesAdvanced(_ *datastore.AdvancedSearchFilters) ([]datastore.Note, int64, error) {
 	return nil, 0, nil
@@ -228,9 +228,6 @@ func (m *ActionMockDatastore) GetHourlyDetections(_, _ string, _, _, _ int) ([]d
 	return nil, nil
 }
 func (m *ActionMockDatastore) CountSpeciesDetections(_, _, _ string, _ int) (int64, error) {
-	return 0, nil
-}
-func (m *ActionMockDatastore) CountSearchResults(_ string) (int64, error) {
 	return 0, nil
 }
 func (m *ActionMockDatastore) Transaction(_ func(tx *gorm.DB) error) error {

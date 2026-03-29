@@ -28,6 +28,7 @@ const LOCALE_DATA: {
   { code: 'fi', name: 'Suomi', settingsTranslation: 'Asetukset' },
   { code: 'fr', name: 'Francais', settingsTranslation: 'Paramètres' },
   { code: 'it', name: 'Italiano', settingsTranslation: 'Impostazioni' },
+  { code: 'hu', name: 'Magyar', settingsTranslation: 'Beállítások' },
   { code: 'nl', name: 'Nederlands', settingsTranslation: 'Instellingen' },
   { code: 'pl', name: 'Polski', settingsTranslation: 'Ustawienia' },
   { code: 'pt', name: 'Portugues', settingsTranslation: 'Configurações' },

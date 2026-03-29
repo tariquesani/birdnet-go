@@ -33,6 +33,13 @@ func (p *Processor) getTaxonomyDB() *birdnet.TaxonomyDatabase {
 	return p.taxonomyDB
 }
 
+// RebuildExtendedCaptureFilter re-resolves the extended capture species filter
+// from the current settings. This is called by the control monitor when
+// ExtendedCapture settings (Enabled, Species, MaxDuration) change at runtime.
+func (p *Processor) RebuildExtendedCaptureFilter() {
+	p.initExtendedCapture()
+}
+
 // initExtendedCapture resolves the extended capture species filter at startup.
 // Called from Processor.New(). Safe to re-call on settings refresh.
 func (p *Processor) initExtendedCapture() {
@@ -128,13 +135,11 @@ func resolveSpeciesFilter(configSpecies, labels []string, taxonomyDB *birdnet.Ta
 		}
 
 		// Try taxonomy lookups if database is available.
-		// These are tried after common/scientific name lookups because
-		// failed taxonomy lookups generate telemetry errors via the
-		// error builder, causing noise for localized common names that
-		// don't match any genus/family/order.
+		// Use non-telemetry Lookup* methods to avoid Sentry noise for
+		// localized common names that don't match any genus/family/order.
 		if taxonomyDB != nil {
 			// Try as genus name
-			if genusSpecies, err := taxonomyDB.GetAllSpeciesInGenus(entry); err == nil {
+			if genusSpecies := taxonomyDB.LookupAllSpeciesInGenus(entry); genusSpecies != nil {
 				for _, sp := range genusSpecies {
 					resolved[strings.ToLower(sp)] = true
 				}
@@ -142,7 +147,7 @@ func resolveSpeciesFilter(configSpecies, labels []string, taxonomyDB *birdnet.Ta
 			}
 
 			// Try as family name
-			if familySpecies, err := taxonomyDB.GetAllSpeciesInFamily(entry); err == nil {
+			if familySpecies := taxonomyDB.LookupAllSpeciesInFamily(entry); familySpecies != nil {
 				for _, sp := range familySpecies {
 					resolved[strings.ToLower(sp)] = true
 				}
@@ -150,7 +155,7 @@ func resolveSpeciesFilter(configSpecies, labels []string, taxonomyDB *birdnet.Ta
 			}
 
 			// Try as order name
-			if orderSpecies, err := taxonomyDB.GetAllSpeciesInOrder(entry); err == nil {
+			if orderSpecies := taxonomyDB.LookupAllSpeciesInOrder(entry); orderSpecies != nil {
 				for _, sp := range orderSpecies {
 					resolved[strings.ToLower(sp)] = true
 				}

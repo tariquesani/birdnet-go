@@ -20,13 +20,14 @@ import (
 	"github.com/tphakala/birdnet-go/internal/api/auth"
 	mw "github.com/tphakala/birdnet-go/internal/api/middleware"
 	apiv2 "github.com/tphakala/birdnet-go/internal/api/v2"
+	"github.com/tphakala/birdnet-go/internal/audiocore"
+	"github.com/tphakala/birdnet-go/internal/audiocore/engine"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	datastoreV2 "github.com/tphakala/birdnet-go/internal/datastore/v2"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/logger"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observability"
 	"github.com/tphakala/birdnet-go/internal/security"
 	"github.com/tphakala/birdnet-go/internal/suncalc"
@@ -62,9 +63,12 @@ type Server struct {
 	authService    auth.Service
 	authMiddleware echo.MiddlewareFunc
 
+	// Audio engine (unified audio subsystem)
+	engine *engine.AudioEngine
+
 	// Channels
 	controlChan    chan string
-	audioLevelChan chan myaudio.AudioLevelData
+	audioLevelChan chan audiocore.AudioLevelData
 
 	// API controller
 	apiController *apiv2.Controller
@@ -154,7 +158,7 @@ func WithControlChannel(ch chan string) ServerOption {
 }
 
 // WithAudioLevelChannel sets the audio level channel for SSE streaming.
-func WithAudioLevelChannel(ch chan myaudio.AudioLevelData) ServerOption {
+func WithAudioLevelChannel(ch chan audiocore.AudioLevelData) ServerOption {
 	return func(s *Server) {
 		s.audioLevelChan = ch
 	}
@@ -164,6 +168,13 @@ func WithAudioLevelChannel(ch chan myaudio.AudioLevelData) ServerOption {
 func WithV2Manager(mgr datastoreV2.Manager) ServerOption {
 	return func(s *Server) {
 		s.v2Manager = mgr
+	}
+}
+
+// WithAudioEngine sets the AudioEngine for audio subsystem access.
+func WithAudioEngine(e *engine.AudioEngine) ServerOption {
+	return func(s *Server) {
+		s.engine = e
 	}
 }
 
@@ -244,6 +255,11 @@ func (s *Server) initAuth() {
 
 // setupMiddleware configures the Echo middleware stack.
 func (s *Server) setupMiddleware() {
+	// HEAD→GET rewrite — runs before routing so HEAD requests match GET routes.
+	// Per RFC 9110 §9.3.2, HEAD must return the same status as GET.
+	// Go's net/http automatically suppresses the response body for HEAD.
+	s.echo.Pre(mw.NewHeadToGet())
+
 	// Recovery middleware - should be first
 	s.echo.Use(echomw.Recover())
 
@@ -319,6 +335,7 @@ func (s *Server) setupRoutes() error {
 		apiv2.WithAuthService(s.authService),
 		apiv2.WithV2Manager(s.v2Manager),
 		apiv2.WithMetricsStore(observability.NewMemoryStore(apiv2.MetricsHistoryMaxPoints)),
+		apiv2.WithAudioEngine(s.engine),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize API v2: %w", err)

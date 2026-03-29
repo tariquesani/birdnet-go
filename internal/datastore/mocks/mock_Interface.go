@@ -229,62 +229,6 @@ func (_c *MockInterface_CountResults_Call) RunAndReturn(run func() (int64, error
 	return _c
 }
 
-// CountSearchResults provides a mock function with given fields: query
-func (_m *MockInterface) CountSearchResults(query string) (int64, error) {
-	ret := _m.Called(query)
-
-	if len(ret) == 0 {
-		panic("no return value specified for CountSearchResults")
-	}
-
-	var r0 int64
-	var r1 error
-	if rf, ok := ret.Get(0).(func(string) (int64, error)); ok {
-		return rf(query)
-	}
-	if rf, ok := ret.Get(0).(func(string) int64); ok {
-		r0 = rf(query)
-	} else {
-		r0 = ret.Get(0).(int64)
-	}
-
-	if rf, ok := ret.Get(1).(func(string) error); ok {
-		r1 = rf(query)
-	} else {
-		r1 = ret.Error(1)
-	}
-
-	return r0, r1
-}
-
-// MockInterface_CountSearchResults_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CountSearchResults'
-type MockInterface_CountSearchResults_Call struct {
-	*mock.Call
-}
-
-// CountSearchResults is a helper method to define mock.On call
-//   - query string
-func (_e *MockInterface_Expecter) CountSearchResults(query interface{}) *MockInterface_CountSearchResults_Call {
-	return &MockInterface_CountSearchResults_Call{Call: _e.mock.On("CountSearchResults", query)}
-}
-
-func (_c *MockInterface_CountSearchResults_Call) Run(run func(query string)) *MockInterface_CountSearchResults_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
-	})
-	return _c
-}
-
-func (_c *MockInterface_CountSearchResults_Call) Return(_a0 int64, _a1 error) *MockInterface_CountSearchResults_Call {
-	_c.Call.Return(_a0, _a1)
-	return _c
-}
-
-func (_c *MockInterface_CountSearchResults_Call) RunAndReturn(run func(string) (int64, error)) *MockInterface_CountSearchResults_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
 // CountSpeciesDetections provides a mock function with given fields: species, date, hour, duration
 func (_m *MockInterface) CountSpeciesDetections(species string, date string, hour string, duration int) (int64, error) {
 	ret := _m.Called(species, date, hour, duration)
@@ -4239,7 +4183,7 @@ func (_c *MockInterface_SearchDetections_Call) RunAndReturn(run func(*datastore.
 }
 
 // SearchNotes provides a mock function with given fields: query, sortAscending, limit, offset
-func (_m *MockInterface) SearchNotes(query string, sortAscending bool, limit int, offset int) ([]datastore.Note, error) {
+func (_m *MockInterface) SearchNotes(query string, sortAscending bool, limit int, offset int) ([]datastore.Note, int64, error) {
 	ret := _m.Called(query, sortAscending, limit, offset)
 
 	if len(ret) == 0 {
@@ -4247,8 +4191,9 @@ func (_m *MockInterface) SearchNotes(query string, sortAscending bool, limit int
 	}
 
 	var r0 []datastore.Note
-	var r1 error
-	if rf, ok := ret.Get(0).(func(string, bool, int, int) ([]datastore.Note, error)); ok {
+	var r1 int64
+	var r2 error
+	if rf, ok := ret.Get(0).(func(string, bool, int, int) ([]datastore.Note, int64, error)); ok {
 		return rf(query, sortAscending, limit, offset)
 	}
 	if rf, ok := ret.Get(0).(func(string, bool, int, int) []datastore.Note); ok {
@@ -4259,13 +4204,19 @@ func (_m *MockInterface) SearchNotes(query string, sortAscending bool, limit int
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string, bool, int, int) error); ok {
+	if rf, ok := ret.Get(1).(func(string, bool, int, int) int64); ok {
 		r1 = rf(query, sortAscending, limit, offset)
 	} else {
-		r1 = ret.Error(1)
+		r1 = ret.Get(1).(int64)
 	}
 
-	return r0, r1
+	if rf, ok := ret.Get(2).(func(string, bool, int, int) error); ok {
+		r2 = rf(query, sortAscending, limit, offset)
+	} else {
+		r2 = ret.Error(2)
+	}
+
+	return r0, r1, r2
 }
 
 // MockInterface_SearchNotes_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SearchNotes'
@@ -4289,12 +4240,12 @@ func (_c *MockInterface_SearchNotes_Call) Run(run func(query string, sortAscendi
 	return _c
 }
 
-func (_c *MockInterface_SearchNotes_Call) Return(_a0 []datastore.Note, _a1 error) *MockInterface_SearchNotes_Call {
-	_c.Call.Return(_a0, _a1)
+func (_c *MockInterface_SearchNotes_Call) Return(_a0 []datastore.Note, _a1 int64, _a2 error) *MockInterface_SearchNotes_Call {
+	_c.Call.Return(_a0, _a1, _a2)
 	return _c
 }
 
-func (_c *MockInterface_SearchNotes_Call) RunAndReturn(run func(string, bool, int, int) ([]datastore.Note, error)) *MockInterface_SearchNotes_Call {
+func (_c *MockInterface_SearchNotes_Call) RunAndReturn(run func(string, bool, int, int) ([]datastore.Note, int64, error)) *MockInterface_SearchNotes_Call {
 	_c.Call.Return(run)
 	return _c
 }

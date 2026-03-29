@@ -2,17 +2,30 @@
 package api
 
 import (
-	"fmt"
 	"reflect"
 
 	"github.com/tphakala/birdnet-go/internal/conf"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/notification"
 )
 
-// audioDeviceSettingChanged checks if audio device settings have changed
+// audioDeviceSettingChanged checks if audio device pipeline settings have changed.
+// Only compares device-affecting fields (Device, Gain, Model), not display-only
+// fields (Name, Equalizer, QuietHours) which are handled separately.
 func audioDeviceSettingChanged(oldSettings, currentSettings *conf.Settings) bool {
-	return oldSettings.Realtime.Audio.Source != currentSettings.Realtime.Audio.Source
+	oldSources := oldSettings.Realtime.Audio.Sources
+	newSources := currentSettings.Realtime.Audio.Sources
+
+	if len(oldSources) != len(newSources) {
+		return true
+	}
+	for i := range oldSources {
+		if oldSources[i].Device != newSources[i].Device ||
+			oldSources[i].Gain != newSources[i].Gain ||
+			oldSources[i].Model != newSources[i].Model {
+			return true
+		}
+	}
+	return false
 }
 
 // soundLevelSettingsChanged checks if sound level monitoring settings have changed
@@ -37,11 +50,10 @@ func equalizerSettingsChanged(oldSettings, newSettings conf.EqualizerSettings) b
 }
 
 // handleEqualizerChange updates the audio filter chain when equalizer settings change
-func (c *Controller) handleEqualizerChange(settings *conf.Settings) error {
-	registry := myaudio.GetRegistry()
-	if err := registry.UpdateAllFilterChains(settings); err != nil {
-		return fmt.Errorf("failed to update audio filter chains: %w", err)
-	}
+func (c *Controller) handleEqualizerChange(_ *conf.Settings) error {
+	// TODO: Equalizer filter chains need to be migrated to audiocore.
+	// For now, this is a no-op; equalizer settings changes will take effect on restart.
+	c.Debug("Equalizer filter chain update is a no-op pending audiocore filter migration")
 	return nil
 }
 
@@ -54,10 +66,10 @@ func getAudioBlockedFields() map[string]any {
 	}
 }
 
-// extendedCaptureSettingsChanged checks if extended capture settings have changed
-// in a way that requires a restart. When extended capture is disabled on both old
-// and new settings, changes to MaxDuration or Species are irrelevant.
-func extendedCaptureSettingsChanged(oldSettings, currentSettings *conf.Settings) bool {
+// extendedCaptureFilterChanged checks if extended capture settings that affect
+// the species filter have changed (Enabled, Species, MaxDuration). These changes
+// can be applied at runtime without a restart by rebuilding the filter map.
+func extendedCaptureFilterChanged(oldSettings, currentSettings *conf.Settings) bool {
 	old := oldSettings.Realtime.ExtendedCapture
 	cur := currentSettings.Realtime.ExtendedCapture
 
@@ -81,6 +93,15 @@ func extendedCaptureSettingsChanged(oldSettings, currentSettings *conf.Settings)
 	return false
 }
 
+// extendedCaptureBufferChanged checks if capture buffer settings have changed,
+// which requires a restart to resize the audio ring buffer.
+func extendedCaptureBufferChanged(oldSettings, currentSettings *conf.Settings) bool {
+	old := oldSettings.Realtime.ExtendedCapture
+	cur := currentSettings.Realtime.ExtendedCapture
+
+	return old.CaptureBufferSeconds != cur.CaptureBufferSeconds
+}
+
 // handleAudioSettingsChanges checks for audio-related settings changes and triggers appropriate actions
 func (c *Controller) handleAudioSettingsChanges(oldSettings, currentSettings *conf.Settings) ([]string, error) {
 	var reconfigActions []string
@@ -102,37 +123,48 @@ func (c *Controller) handleAudioSettingsChanges(oldSettings, currentSettings *co
 			notification.MsgSettingsAudioDeviceRestart, nil)
 	}
 
-	// Check extended capture settings (requires restart to resize capture buffers)
-	if extendedCaptureSettingsChanged(oldSettings, currentSettings) {
-		c.Debug("Extended capture settings changed. A restart will be required.")
-		_ = c.SendToastWithKey("Extended capture settings changed. Restart required to apply changes.", "warning", toastDurationExtended,
+	// Check extended capture filter settings (hot-reloadable: Enabled, Species, MaxDuration)
+	if extendedCaptureFilterChanged(oldSettings, currentSettings) {
+		c.Debug("Extended capture filter settings changed, triggering rebuild")
+		reconfigActions = append(reconfigActions, "rebuild_extended_capture")
+		_ = c.SendToastWithKey("Rebuilding extended capture species filter...", "info", toastDurationShort,
+			notification.MsgSettingsRebuildingExtendedCapture, nil)
+	}
+
+	// Check extended capture buffer settings (requires restart to resize audio ring buffer)
+	if extendedCaptureBufferChanged(oldSettings, currentSettings) {
+		c.Debug("Extended capture buffer settings changed. A restart will be required.")
+		_ = c.SendToastWithKey("Extended capture buffer settings changed. Restart required to apply.", "warning", toastDurationExtended,
 			notification.MsgSettingsExtendedCaptureRestart, nil)
 	}
 
 	// Check audio equalizer settings
 	if equalizerSettingsChanged(oldSettings.Realtime.Audio.Equalizer, currentSettings.Realtime.Audio.Equalizer) {
-		c.Debug("Audio equalizer settings changed, updating filter chain")
-		// Handle audio equalizer changes synchronously as it returns an error
-		if err := c.handleEqualizerChange(currentSettings); err != nil {
-			// Send error toast
-			_ = c.SendToastWithKey("Failed to update audio equalizer settings", "error", toastDurationLong,
-				notification.MsgSettingsEqualizerFailed, nil)
-			return reconfigActions, fmt.Errorf("failed to update audio equalizer: %w", err)
-		}
-		// Send success toast
-		_ = c.SendToastWithKey("Audio equalizer settings updated", "success", toastDurationShort,
-			notification.MsgSettingsEqualizerUpdated, nil)
+		c.Debug("Audio equalizer settings changed; will take effect on restart (audiocore filter migration pending)")
+		_ = c.SendToast("Equalizer settings saved. Restart required to apply changes.", "warning", toastDurationExtended)
 	}
 
 	return reconfigActions, nil
 }
 
 // quietHoursSettingsChanged checks if any quiet hours settings have changed
-// across streams or the sound card
+// across streams, audio sources, or the global sound card setting.
 func quietHoursSettingsChanged(oldSettings, currentSettings *conf.Settings) bool {
-	// Check sound card quiet hours
+	// Check global sound card quiet hours (legacy fallback)
 	if !reflect.DeepEqual(oldSettings.Realtime.Audio.QuietHours, currentSettings.Realtime.Audio.QuietHours) {
 		return true
+	}
+
+	// Check per-audio-source quiet hours
+	oldSources := oldSettings.Realtime.Audio.Sources
+	newSources := currentSettings.Realtime.Audio.Sources
+	if len(oldSources) != len(newSources) {
+		return true
+	}
+	for i := range oldSources {
+		if !reflect.DeepEqual(oldSources[i].QuietHours, newSources[i].QuietHours) {
+			return true
+		}
 	}
 
 	// Check stream quiet hours (compare each stream's QuietHours field)

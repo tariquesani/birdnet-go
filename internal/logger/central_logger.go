@@ -291,8 +291,11 @@ func (cl *CentralLogger) Module(name string) Logger {
 		}
 
 		// Also log to console if requested - USE TEXT FORMAT
+		// Use the console's configured level (not the module's) so that
+		// modules with debug-level file output don't flood stdout.
 		if moduleConfig.ConsoleAlso && cl.config.Console != nil && cl.config.Console.Enabled {
-			handlers = append(handlers, newTextHandler(os.Stdout, moduleLevel, cl.timezone))
+			consoleLevel := parseLogLevel(cl.config.Console.Level)
+			handlers = append(handlers, newTextHandler(os.Stdout, consoleLevel, cl.timezone))
 		}
 	} else {
 		// Use base handler (console + main file)
@@ -477,12 +480,21 @@ type moduleLogger struct {
 	fields   []Field
 }
 
+// isValid reports whether the moduleLogger is properly initialized with a
+// non-nil inner slog.Logger.  It is safe to call on a nil receiver.
+func (m *moduleLogger) isValid() bool {
+	return m != nil && m.logger != nil
+}
+
 // Module creates a sub-module logger.
 // The returned logger shares the parent's slog.Logger but gets its own copy of fields
 // to ensure immutability - modifications to parent fields won't affect children.
 func (m *moduleLogger) Module(name string) Logger {
 	if m == nil {
 		return nil
+	}
+	if !m.isValid() {
+		return m
 	}
 
 	return &moduleLogger{
@@ -496,7 +508,7 @@ func (m *moduleLogger) Module(name string) Logger {
 
 // Trace logs a trace message (most verbose level)
 func (m *moduleLogger) Trace(msg string, fields ...Field) {
-	if m == nil || m.level > traceLevelValue {
+	if !m.isValid() || m.level > traceLevelValue {
 		return
 	}
 	m.log(traceLevelValue, msg, fields...)
@@ -504,7 +516,7 @@ func (m *moduleLogger) Trace(msg string, fields ...Field) {
 
 // Debug logs a debug message
 func (m *moduleLogger) Debug(msg string, fields ...Field) {
-	if m == nil || m.level > slog.LevelDebug {
+	if !m.isValid() || m.level > slog.LevelDebug {
 		return
 	}
 	m.log(slog.LevelDebug, msg, fields...)
@@ -512,7 +524,7 @@ func (m *moduleLogger) Debug(msg string, fields ...Field) {
 
 // Info logs an info message
 func (m *moduleLogger) Info(msg string, fields ...Field) {
-	if m == nil || m.level > slog.LevelInfo {
+	if !m.isValid() || m.level > slog.LevelInfo {
 		return
 	}
 	m.log(slog.LevelInfo, msg, fields...)
@@ -520,7 +532,7 @@ func (m *moduleLogger) Info(msg string, fields ...Field) {
 
 // Warn logs a warning message
 func (m *moduleLogger) Warn(msg string, fields ...Field) {
-	if m == nil || m.level > slog.LevelWarn {
+	if !m.isValid() || m.level > slog.LevelWarn {
 		return
 	}
 	m.log(slog.LevelWarn, msg, fields...)
@@ -528,7 +540,7 @@ func (m *moduleLogger) Warn(msg string, fields ...Field) {
 
 // Error logs an error message
 func (m *moduleLogger) Error(msg string, fields ...Field) {
-	if m == nil {
+	if !m.isValid() {
 		return
 	}
 	m.log(slog.LevelError, msg, fields...)
@@ -536,7 +548,7 @@ func (m *moduleLogger) Error(msg string, fields ...Field) {
 
 // Log logs a message with explicit level
 func (m *moduleLogger) Log(level LogLevel, msg string, fields ...Field) {
-	if m == nil {
+	if !m.isValid() {
 		return
 	}
 	m.log(parseSlogLevel(level), msg, fields...)
@@ -546,6 +558,9 @@ func (m *moduleLogger) Log(level LogLevel, msg string, fields ...Field) {
 func (m *moduleLogger) With(fields ...Field) Logger {
 	if m == nil {
 		return nil
+	}
+	if !m.isValid() {
+		return m
 	}
 
 	return &moduleLogger{
@@ -561,6 +576,9 @@ func (m *moduleLogger) With(fields ...Field) Logger {
 func (m *moduleLogger) WithContext(ctx context.Context) Logger {
 	if m == nil {
 		return nil
+	}
+	if !m.isValid() {
+		return m
 	}
 
 	if ctx == nil {
@@ -585,7 +603,7 @@ func (m *moduleLogger) Flush() error {
 
 // log is the internal logging method
 func (m *moduleLogger) log(level slog.Level, msg string, fields ...Field) {
-	if m == nil {
+	if !m.isValid() {
 		return
 	}
 

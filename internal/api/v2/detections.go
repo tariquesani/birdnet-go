@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -38,6 +41,10 @@ const (
 	maxNumResults         = 1000             // Maximum number of results
 	sunEventWindowMinutes = 30               // Minutes before/after sunrise/sunset
 	minHourRangeParts     = 2                // Minimum parts for hour range parsing
+
+	// queryType values for detection queries
+	queryTypeSpecies = "species"
+	queryTypeSearch  = "search"
 )
 
 // Regex to validate YYYY-MM-DD format and check for unwanted characters
@@ -283,12 +290,19 @@ func (c *Controller) parseDetectionQueryParams(ctx echo.Context) (*detectionQuer
 	params.Duration = duration
 
 	// Validate dates
+	if err := validateDateParam(params.Date, "date"); err != nil {
+		return nil, &dateValidationError{message: err.Error(), paramName: "date"}
+	}
 	if err := c.validateDateParameters(params.StartDate, params.EndDate, ctx); err != nil {
 		return nil, err
 	}
 
-	// Parse and validate numResults
-	numResults, err := c.parseNumResults(ctx.QueryParam("numResults"))
+	// Parse and validate numResults (accept "limit" as an alias for better API ergonomics)
+	numResultsStr := ctx.QueryParam("numResults")
+	if numResultsStr == "" {
+		numResultsStr = ctx.QueryParam("limit")
+	}
+	numResults, err := c.parseNumResults(numResultsStr)
 	if err != nil {
 		return nil, err
 	}
@@ -314,6 +328,18 @@ func (c *Controller) parseDetectionQueryParams(ctx echo.Context) (*detectionQuer
 			allowedKeys := slices.Sorted(maps.Keys(allowedSortBy))
 			return nil, echo.NewHTTPError(http.StatusBadRequest,
 				fmt.Sprintf("invalid sortBy parameter '%s'. Allowed values: %v", params.SortBy, allowedKeys))
+		}
+	}
+
+	// Auto-infer queryType from provided parameters when not explicitly set.
+	// This prevents silent parameter ignoring — e.g., ?species=Robin without
+	// queryType=species would previously fall through to the "all" path.
+	if params.QueryType == "" {
+		switch {
+		case params.Species != "":
+			params.QueryType = queryTypeSpecies
+		case params.Search != "":
+			params.QueryType = queryTypeSearch
 		}
 	}
 
@@ -553,18 +579,21 @@ func (c *Controller) GetDetections(ctx echo.Context) error {
 
 // getDetectionsByQueryType retrieves detections based on the query type
 func (c *Controller) getDetectionsByQueryType(params *detectionQueryParams) ([]datastore.Note, int64, error) {
-	// Check if advanced filters are present (non-default sort counts as advanced)
+	// Check if advanced filters are present (non-default sort counts as advanced).
+	// Date parameters are included so that ?date=2025-03-07 without an explicit
+	// queryType routes through the advanced search path instead of being ignored.
 	hasAdvancedFilters := params.Confidence != "" || params.TimeOfDay != "" ||
 		params.HourRange != "" || params.Verified != "" ||
 		params.Location != "" || params.Locked != "" ||
+		params.Date != "" || params.StartDate != "" || params.EndDate != "" ||
 		(params.SortBy != "" && params.SortBy != "date_desc")
 
 	switch params.QueryType {
 	case "hourly":
 		return c.getHourlyDetections(params.Date, params.Hour, params.Duration, params.NumResults, params.Offset)
-	case "species":
+	case queryTypeSpecies:
 		return c.getSpeciesDetections(params.Species, params.Date, params.Hour, params.Duration, params.NumResults, params.Offset)
-	case "search":
+	case queryTypeSearch:
 		// Use advanced search if filters are present
 		if hasAdvancedFilters {
 			return c.getSearchDetectionsAdvanced(params)
@@ -618,7 +647,7 @@ func (c *Controller) noteToDetectionResponse(note *datastore.Note, includeWeathe
 		c.Debug("Failed to parse detection timestamp from date=%q time=%q: %v", note.Date, note.Time, err)
 	}
 
-	c.applySpeciesTrackingMetadata(&detection, note.ScientificName)
+	c.applySpeciesTrackingMetadata(&detection, note.ScientificName, note.Date)
 	detection.Verified = c.mapVerificationStatus(note.Verified)
 	detection.Comments = extractNoteComments(note.Comments)
 
@@ -629,16 +658,35 @@ func (c *Controller) noteToDetectionResponse(note *datastore.Note, includeWeathe
 	return detection
 }
 
-// applySpeciesTrackingMetadata adds species tracking info to detection response
-func (c *Controller) applySpeciesTrackingMetadata(detection *DetectionResponse, scientificName string) {
+// applySpeciesTrackingMetadata adds species tracking info to detection response.
+// The detectionDate parameter (YYYY-MM-DD) is used to determine whether this specific
+// detection was the first sighting of the species (ever, this year, or this season).
+// Without this, all detections of a recently-first-seen species would incorrectly
+// show isNewSpecies=true instead of only the actual first detection.
+func (c *Controller) applySpeciesTrackingMetadata(detection *DetectionResponse, scientificName, detectionDate string) {
 	if c.Processor == nil || c.Processor.NewSpeciesTracker == nil {
 		return
 	}
+	// GetSpeciesStatus is called with time.Now() intentionally: the "days since"
+	// counters (DaysSinceFirstSeen, DaysThisYear, DaysThisSeason) describe the
+	// species' current tracking state, not the state at the detection's time.
+	// The boolean flags (IsNew*) are computed below using date comparison instead.
 	status := c.Processor.NewSpeciesTracker.GetSpeciesStatus(scientificName, time.Now())
-	detection.IsNewSpecies = status.IsNew
+
+	// Set flags based on whether THIS detection's date matches the first-seen date
+	// for each tracking period, rather than using the tracker's window-based "IsNew" flag.
+	// The window-based flag marks the entire species as "new" for N days, which causes
+	// every detection of that species to show isNewSpecies=true during the window.
+	detection.IsNewSpecies = !status.FirstSeenTime.IsZero() &&
+		detectionDate == status.FirstSeenTime.Format(time.DateOnly)
+	detection.IsNewThisYear = status.FirstThisYear != nil &&
+		detectionDate == status.FirstThisYear.Format(time.DateOnly)
+	detection.IsNewThisSeason = status.FirstThisSeason != nil &&
+		detectionDate == status.FirstThisSeason.Format(time.DateOnly)
+
+	// DaysSinceFirstSeen is relative to now — tells the user how long ago
+	// this species was first observed overall.
 	detection.DaysSinceFirstSeen = status.DaysSinceFirst
-	detection.IsNewThisYear = status.IsNewThisYear
-	detection.IsNewThisSeason = status.IsNewThisSeason
 	detection.DaysThisYear = status.DaysThisYear
 	detection.DaysThisSeason = status.DaysThisSeason
 	detection.CurrentSeason = status.CurrentSeason
@@ -983,21 +1031,12 @@ func (c *Controller) getSearchDetections(search string, numResults, offset int) 
 	}
 
 	// If not in cache, query the database
-	notes, err := c.DS.SearchNotes(search, false, numResults, offset)
+	notes, totalCount, err := c.DS.SearchNotes(search, false, numResults, offset)
 	if err != nil {
 		c.logErrorIfEnabled("Failed to search notes",
 			logger.String("query", search),
 			logger.Int("limit", numResults),
 			logger.Int("offset", offset),
-			logger.Error(err),
-		)
-		return nil, 0, err
-	}
-
-	totalCount, err := c.DS.CountSearchResults(search)
-	if err != nil {
-		c.logErrorIfEnabled("Failed to count search results",
-			logger.String("query", search),
 			logger.Error(err),
 		)
 		return nil, 0, err
@@ -1033,7 +1072,7 @@ func (c *Controller) getAllDetections(numResults, offset int) ([]datastore.Note,
 	}
 
 	// Use the datastore.SearchNotes method with an empty query to get all notes
-	notes, err := c.DS.SearchNotes("", false, numResults, offset)
+	notes, totalResults, err := c.DS.SearchNotes("", false, numResults, offset)
 	if err != nil {
 		c.logErrorIfEnabled("Failed to get all detections",
 			logger.Int("limit", numResults),
@@ -1041,13 +1080,6 @@ func (c *Controller) getAllDetections(numResults, offset int) ([]datastore.Note,
 			logger.Error(err),
 		)
 		return nil, 0, err
-	}
-
-	// Estimate total by counting
-	totalResults := int64(len(notes))
-	if len(notes) == numResults {
-		// If we got exactly the number requested, there may be more
-		totalResults = int64(offset + numResults + 1) // This is an estimate
 	}
 
 	// Cache the results
@@ -1113,6 +1145,9 @@ func (c *Controller) DeleteDetection(ctx echo.Context) error {
 		return c.HandleError(ctx, fmt.Errorf("detection is locked"), "Detection is locked", http.StatusForbidden)
 	}
 
+	// Capture the clip name before deleting the DB record
+	clipName := note.ClipName
+
 	err = c.DS.Delete(idStr)
 	if err != nil {
 		return c.HandleError(ctx, err, "Failed to delete detection", http.StatusInternalServerError)
@@ -1121,7 +1156,89 @@ func (c *Controller) DeleteDetection(ctx echo.Context) error {
 	// Invalidate cache after deletion
 	c.invalidateDetectionCache()
 
+	// Best-effort removal of associated clip and spectrogram files.
+	// Failures are logged but do not affect the API response.
+	if clipName != "" {
+		c.removeDetectionFiles(clipName)
+	}
+
 	return ctx.NoContent(http.StatusNoContent)
+}
+
+// spectrogramWidths lists all valid spectrogram widths used for file naming.
+// These correspond to the size constants: sm=258, md=514, lg=1026, xl=2050.
+var spectrogramWidths = []int{
+	SpectrogramSizeSm,
+	SpectrogramSizeMd,
+	SpectrogramSizeLg,
+	SpectrogramSizeXl,
+}
+
+// removeDetectionFiles removes the audio clip and all associated spectrogram
+// files from disk. Deletions are best-effort: files that are already missing
+// are silently ignored, and other errors are logged as warnings without
+// affecting the caller.
+func (c *Controller) removeDetectionFiles(clipName string) {
+	log := c.apiLogger
+
+	// Normalize the clip path to get a relative path within SecureFS
+	clipsPrefix := c.Settings.Realtime.Audio.Export.Path
+	normalized := NormalizeClipPath(clipName, clipsPrefix)
+	if normalized == "" {
+		log.Warn("Cannot remove detection files: empty normalized clip path",
+			logger.String("clip_name", clipName))
+		return
+	}
+
+	// Validate that the normalized path stays within the managed tree
+	if !filepath.IsLocal(normalized) {
+		log.Warn("Refusing to remove files: path escapes managed directory",
+			logger.String("normalized", normalized),
+			logger.String("clip_name", clipName))
+		return
+	}
+
+	baseDir := c.SFS.BaseDir()
+	absClipPath := filepath.Join(baseDir, normalized)
+
+	// Remove the audio clip file
+	if err := os.Remove(absClipPath); err != nil {
+		if !os.IsNotExist(err) {
+			log.Warn("Failed to remove audio clip file",
+				logger.String("path", absClipPath),
+				logger.Error(err))
+		}
+	} else {
+		log.Info("Removed audio clip file",
+			logger.String("path", absClipPath))
+	}
+
+	// Remove all associated spectrogram files.
+	// Spectrograms follow the naming pattern: <basename>_<width>px.png
+	// and <basename>_<width>px-legend.png for each valid width.
+	ext := filepath.Ext(normalized)
+	basePath := strings.TrimSuffix(absClipPath, ext)
+
+	removed := 0
+	suffixes := []string{"%s_%dpx.png", "%s_%dpx-legend.png"}
+	for _, width := range spectrogramWidths {
+		for _, sfx := range suffixes {
+			path := fmt.Sprintf(sfx, basePath, width)
+			if err := os.Remove(path); err == nil {
+				removed++
+			} else if !os.IsNotExist(err) {
+				log.Warn("Failed to remove spectrogram file",
+					logger.String("path", path),
+					logger.Error(err))
+			}
+		}
+	}
+
+	if removed > 0 {
+		log.Info("Removed associated spectrogram files",
+			logger.Int("count", removed),
+			logger.String("clip_name", clipName))
+	}
 }
 
 // invalidateDetectionCache clears the detection cache to ensure fresh data
@@ -1334,7 +1451,7 @@ func (c *Controller) IgnoreSpecies(ctx echo.Context) error {
 
 // GetExcludedSpecies returns the list of excluded species
 func (c *Controller) GetExcludedSpecies(ctx echo.Context) error {
-	settings := conf.GetSettings()
+	settings := c.Settings
 
 	// Create a copy of the slice to avoid race conditions
 	c.speciesExcludeMutex.Lock()
@@ -1368,8 +1485,8 @@ func (c *Controller) toggleSpeciesInIgnoredList(species string) (action string, 
 	c.speciesExcludeMutex.Lock()
 	defer c.speciesExcludeMutex.Unlock()
 
-	// Access the latest settings using the settings accessor function
-	settings := conf.GetSettings()
+	// Access settings via dependency injection (not the global singleton)
+	settings := c.Settings
 
 	// Check if species is already in the excluded list
 	wasExcluded := slices.Contains(settings.Realtime.Species.Exclude, species)
@@ -1414,8 +1531,8 @@ func (c *Controller) addSpeciesToIgnoredList(species string) error {
 	c.speciesExcludeMutex.Lock()
 	defer c.speciesExcludeMutex.Unlock()
 
-	// Access the latest settings using the settings accessor function
-	settings := conf.GetSettings()
+	// Access settings via dependency injection (not the global singleton)
+	settings := c.Settings
 
 	// Check if species is already in the excluded list
 	isExcluded := slices.Contains(settings.Realtime.Species.Exclude, species)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/datastore/v2/entities"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"gorm.io/gorm"
@@ -13,6 +14,7 @@ import (
 // notificationHistoryRepository implements NotificationHistoryRepository.
 type notificationHistoryRepository struct {
 	db          *gorm.DB
+	metrics     *datastore.Metrics
 	labelRepo   LabelRepository
 	useV2Prefix bool
 	isMySQL     bool // For API consistency; currently unused here (used by detection_impl.go for dialect-specific SQL)
@@ -21,12 +23,14 @@ type notificationHistoryRepository struct {
 // NewNotificationHistoryRepository creates a new NotificationHistoryRepository.
 // Parameters:
 //   - db: GORM database connection
+//   - metrics: optional DatastoreMetrics for retry observability (nil-safe)
 //   - labelRepo: LabelRepository for resolving scientific names to label IDs
 //   - useV2Prefix: true to use v2_ table prefix (MySQL migration mode)
 //   - isMySQL: true for MySQL dialect (affects date/time SQL expressions)
-func NewNotificationHistoryRepository(db *gorm.DB, labelRepo LabelRepository, useV2Prefix, isMySQL bool) NotificationHistoryRepository {
+func NewNotificationHistoryRepository(db *gorm.DB, metrics *datastore.Metrics, labelRepo LabelRepository, useV2Prefix, isMySQL bool) NotificationHistoryRepository {
 	return &notificationHistoryRepository{
 		db:          db,
+		metrics:     metrics,
 		labelRepo:   labelRepo,
 		useV2Prefix: useV2Prefix,
 		isMySQL:     isMySQL,
@@ -55,12 +59,14 @@ func (r *notificationHistoryRepository) SaveNotificationHistory(ctx context.Cont
 	if history.LabelID == 0 {
 		return errors.NewStd("notification history LabelID must be set before saving")
 	}
-	return r.db.WithContext(ctx).Table(r.tableName()).
-		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "label_id"}, {Name: "notification_type"}},
-			UpdateAll: true,
-		}).
-		Create(history).Error
+	return datastore.RetryOnLock(ctx, "v2_save_notification_history", func() error {
+		return r.db.WithContext(ctx).Table(r.tableName()).
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "label_id"}, {Name: "notification_type"}},
+				UpdateAll: true,
+			}).
+			Create(history).Error
+	}, r.metrics)
 }
 
 // GetNotificationHistory retrieves a notification history entry by scientific name.
@@ -106,8 +112,16 @@ func (r *notificationHistoryRepository) GetActiveNotificationHistory(ctx context
 
 // DeleteExpiredNotificationHistory deletes expired entries.
 func (r *notificationHistoryRepository) DeleteExpiredNotificationHistory(ctx context.Context, before time.Time) (int64, error) {
-	result := r.db.WithContext(ctx).Table(r.tableName()).
-		Where("expires_at < ?", before).
-		Delete(&entities.NotificationHistory{})
-	return result.RowsAffected, result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_delete_expired_notification_history", func() error {
+		result := r.db.WithContext(ctx).Table(r.tableName()).
+			Where("expires_at < ?", before).
+			Delete(&entities.NotificationHistory{})
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	return rowsAffected, err
 }

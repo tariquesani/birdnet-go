@@ -25,24 +25,32 @@ const (
 	// MQTTPublishTimeout is the timeout for MQTT publish operations
 	MQTTPublishTimeout = 10 * time.Second
 
-	// CompositeActionTimeout is the default timeout for each action in a composite action
-	// This is generous to accommodate slow hardware (e.g., Raspberry Pi with SD cards)
-	CompositeActionTimeout = 30 * time.Second
+	// CompositeActionTimeout is the default timeout for each action in a composite action.
+	// After audio export was decoupled, CompositeAction only runs Database, SSE, and MQTT
+	// which are fast operations even on slow hardware.
+	CompositeActionTimeout = 10 * time.Second
 
 	// ExecuteCommandTimeout is the timeout for external command execution
 	ExecuteCommandTimeout = 5 * time.Minute
 )
 
 // DetectionContext provides thread-safe shared state for detection pipeline actions.
-// This enables downstream actions (MQTT, SSE) to access data set by upstream actions
-// (Database) without polling, when used with CompositeAction for sequential execution.
+// This enables downstream actions (MQTT, SSE, SaveAudio) to access data set by
+// upstream actions (Database) without polling, when used with CompositeAction for
+// sequential execution.
 //
 // The context is created once per detection in getActionsForItem() and shared among
 // all actions that need access to the database-assigned detection ID.
 type DetectionContext struct {
 	// NoteID holds the database primary key after successful save.
-	// Use atomic operations: Store() in DatabaseAction, Load() in MqttAction/SSEAction.
+	// Use atomic operations: Store() in DatabaseAction, Load() in MqttAction/SSEAction/SaveAudioAction.
 	NoteID atomic.Uint64
+
+	// ClipSaved indicates whether the audio clip was successfully exported to disk.
+	// SaveAudioAction sets this to true after successful audio export.
+	// This flag is available for any late consumers that need to know whether the
+	// audio file exists on disk.
+	ClipSaved atomic.Bool
 }
 
 // Action is the base interface for all actions that can be executed.
@@ -77,8 +85,7 @@ type DatabaseAction struct {
 	EventTracker      *EventTracker
 	NewSpeciesTracker *species.SpeciesTracker // Add reference to new species tracker
 	processor         *Processor              // Add reference to processor for source name resolution
-	PreRenderer       PreRendererSubmit       // Spectrogram pre-renderer
-	DetectionCtx      *DetectionContext       // Shared context for downstream actions (MQTT, SSE)
+	DetectionCtx      *DetectionContext       // Shared context for downstream actions (MQTT, SSE, SaveAudio)
 	Description       string
 	CorrelationID     string     // Detection correlation ID for log tracking
 	mu                sync.Mutex // Protect concurrent access to Result and Results
@@ -87,9 +94,10 @@ type DatabaseAction struct {
 type SaveAudioAction struct {
 	Settings      *conf.Settings
 	ClipName      string
-	pcmData       []byte
+	pcmData       []byte            // Pre-read PCM data (set by buildSaveAudioAction)
 	NoteID        uint              // Note ID for correlation logging with pre-renderer
 	PreRenderer   PreRendererSubmit // Injected from processor
+	DetectionCtx  *DetectionContext // Shared context to signal ClipSaved to late consumers
 	EventTracker  *EventTracker
 	Description   string
 	CorrelationID string // Detection correlation ID for log tracking

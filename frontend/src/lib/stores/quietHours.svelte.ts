@@ -24,8 +24,8 @@ import { connectionState } from '$lib/stores/connectionState.svelte';
 
 const logger = loggers.ui;
 
-/** Polling interval in milliseconds */
-const POLL_INTERVAL_MS = 30000;
+/** Polling interval in milliseconds (matches quiet hours 1-minute granularity) */
+const POLL_INTERVAL_MS = 60000;
 
 export interface QuietHoursStatus {
   anyActive: boolean;

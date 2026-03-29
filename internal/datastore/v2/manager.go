@@ -2,15 +2,18 @@
 package v2
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/getsentry/sentry-go"
 	"github.com/tphakala/birdnet-go/internal/datastore/v2/entities"
 	"github.com/tphakala/birdnet-go/internal/detection"
+	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/privacy"
 	"github.com/tphakala/birdnet-go/internal/telemetry"
@@ -26,6 +29,12 @@ const defaultGormSlowThreshold = 1 * time.Second
 // sqliteBusyTimeoutMs is the SQLite busy_timeout pragma value in milliseconds.
 // Matches the 30s timeout used by the legacy datastore.
 const sqliteBusyTimeoutMs = 30_000
+
+// walCheckpointInterval is how often a periodic passive WAL checkpoint runs.
+// SQLite's auto-checkpoint (1000 pages) may not fire reliably with connection
+// pooling because the page counter is per-connection. A 5-minute interval
+// prevents unbounded WAL growth while keeping I/O overhead minimal.
+const walCheckpointInterval = 5 * time.Minute
 
 // Manager defines the interface for v2 database operations.
 type Manager interface {
@@ -111,6 +120,13 @@ func reportInitFailure(dbType, operation string, err error, paths ...string) {
 type SQLiteManager struct {
 	db     *gorm.DB
 	dbPath string
+	log    logger.Logger
+
+	// WAL checkpoint lifecycle
+	walMu     sync.Mutex // protects walCtx and walCancel
+	walCtx    context.Context
+	walCancel context.CancelFunc
+	walWg     sync.WaitGroup
 }
 
 // NewSQLiteManager creates a new v2 SQLite database manager.
@@ -141,8 +157,17 @@ func NewSQLiteManager(cfg Config) (*SQLiteManager, error) {
 		gormLogger = gorm_logger.Default.LogMode(gorm_logger.Silent)
 	}
 
-	// Build DSN with recommended SQLite pragmas
-	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=%d&_foreign_keys=ON", dbPath, sqliteBusyTimeoutMs)
+	// Build DSN with recommended SQLite pragmas.
+	// All pragmas are set via DSN query parameters so they apply to every
+	// connection created by the pool, not just the first one.
+	// Use safe separator in case dbPath already contains query parameters
+	// (e.g., "file::memory:?cache=shared" in tests).
+	pragmas := fmt.Sprintf("_journal_mode=WAL&_busy_timeout=%d&_foreign_keys=ON&_synchronous=NORMAL&_cache_size=-4000", sqliteBusyTimeoutMs)
+	sep := "?"
+	if strings.Contains(dbPath, "?") {
+		sep = "&"
+	}
+	dsn := dbPath + sep + pragmas
 
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger: gormLogger,
@@ -151,9 +176,21 @@ func NewSQLiteManager(cfg Config) (*SQLiteManager, error) {
 		return nil, fmt.Errorf("failed to open v2 database: %w", err)
 	}
 
+	// Limit to a single open connection to serialize all database access.
+	// SQLite only supports one writer at a time; with Go's connection pool,
+	// multiple goroutines can obtain separate connections and attempt
+	// concurrent writes, causing "database is locked" errors even with
+	// busy_timeout set.  A single connection eliminates this contention.
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get underlying database: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+
 	return &SQLiteManager{
 		db:     db,
 		dbPath: dbPath,
+		log:    cfg.Logger,
 	}, nil
 }
 
@@ -365,7 +402,10 @@ func (m *SQLiteManager) Path() string {
 }
 
 // Close closes the database connection.
+// Stops the periodic WAL checkpoint goroutine if running.
 func (m *SQLiteManager) Close() error {
+	m.StopPeriodicCheckpoint()
+
 	sqlDB, err := m.db.DB()
 	if err != nil {
 		return fmt.Errorf("failed to get underlying database: %w", err)
@@ -390,6 +430,65 @@ func (m *SQLiteManager) CheckpointWAL() error {
 	}
 
 	return nil
+}
+
+// StartPeriodicCheckpoint starts a background goroutine that runs a passive
+// WAL checkpoint every walCheckpointInterval. This prevents unbounded WAL
+// growth that can occur when SQLite's per-connection auto-checkpoint doesn't
+// fire reliably with connection pooling.
+//
+// Use PASSIVE mode (not TRUNCATE) for the periodic checkpoint because it
+// never blocks writers — it only checkpoints pages that are not in active
+// use. The TRUNCATE mode used in CheckpointWAL() is reserved for shutdown
+// where we want to fully clean up the WAL file.
+func (m *SQLiteManager) StartPeriodicCheckpoint() {
+	m.walMu.Lock()
+	// Guard against double-start — would leak the previous goroutine.
+	if m.walCancel != nil {
+		m.walMu.Unlock()
+		return
+	}
+	m.walCtx, m.walCancel = context.WithCancel(context.Background())
+	m.walMu.Unlock()
+
+	m.walWg.Go(func() {
+		ticker := time.NewTicker(walCheckpointInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-m.walCtx.Done():
+				return
+			case <-ticker.C:
+				if err := m.db.WithContext(m.walCtx).Exec("PRAGMA wal_checkpoint(PASSIVE)").Error; err != nil {
+					// Suppress expected context.Canceled errors during shutdown
+					if m.log != nil && !errors.Is(err, context.Canceled) {
+						m.log.Warn("periodic WAL checkpoint failed",
+							logger.Error(err),
+							logger.String("operation", "periodic_wal_checkpoint"))
+					}
+				}
+			}
+		}
+	})
+
+	if m.log != nil {
+		m.log.Debug("started periodic WAL checkpoint",
+			logger.String("interval", walCheckpointInterval.String()),
+			logger.String("mode", "PASSIVE"))
+	}
+}
+
+// StopPeriodicCheckpoint stops the background WAL checkpoint goroutine.
+func (m *SQLiteManager) StopPeriodicCheckpoint() {
+	m.walMu.Lock()
+	cancel := m.walCancel
+	m.walCancel = nil
+	m.walMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+		m.walWg.Wait()
+	}
 }
 
 // Delete removes the v2 database file.

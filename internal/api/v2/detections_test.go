@@ -8,6 +8,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -19,6 +21,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/tphakala/birdnet-go/internal/analysis/processor"
+	"github.com/tphakala/birdnet-go/internal/analysis/species"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 )
@@ -185,7 +189,7 @@ func TestGetDetections(t *testing.T) {
 				"offset":     "0",
 			},
 			mockSetup: func(m *mock.Mock) {
-				m.On("SearchNotes", "", false, 10, 0).Return(mockNotes, nil)
+				m.On("SearchNotes", "", false, 10, 0).Return(mockNotes, int64(2), nil)
 			},
 			expectedStatus: http.StatusOK,
 			expectedCount:  2,
@@ -247,8 +251,7 @@ func TestGetDetections(t *testing.T) {
 				"offset":     "0",
 			},
 			mockSetup: func(m *mock.Mock) {
-				m.On("SearchNotes", "Crow", false, 10, 0).Return(mockNotes[:1], nil)
-				m.On("CountSearchResults", "Crow").Return(int64(1), nil)
+				m.On("SearchNotes", "Crow", false, 10, 0).Return(mockNotes[:1], int64(1), nil)
 			},
 			expectedStatus: http.StatusOK,
 			expectedCount:  1,
@@ -305,8 +308,7 @@ func TestGetDetections(t *testing.T) {
 			},
 			mockSetup: func(m *mock.Mock) {
 				// Controller should still process the request
-				m.On("SearchNotes", "", false, 100, 0).Return([]datastore.Note{}, nil)
-				m.On("CountSearchResults", mock.Anything).Return(int64(0), nil)
+				m.On("SearchNotes", "", false, 100, 0).Return([]datastore.Note{}, int64(0), nil)
 			},
 			expectedStatus: http.StatusOK, // Now expecting 200 OK
 			expectedCount:  0,
@@ -432,6 +434,105 @@ func TestGetDetections(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), &errResp)
 				require.NoError(t, err)
 				assert.Contains(t, errResp["message"], "Invalid detection query parameters")
+			},
+		},
+		// Auto-inference: species param without queryType should infer queryType=species
+		{
+			name: "Species param without queryType infers species query",
+			queryParams: map[string]string{
+				"species":    "American Crow",
+				"date":       "2025-03-07",
+				"numResults": "10",
+				"offset":     "0",
+			},
+			mockSetup: func(m *mock.Mock) {
+				m.On("SpeciesDetections", "American Crow", "2025-03-07", "", 1, false, 10, 0).Return(mockNotes[:1], nil)
+				m.On("CountSpeciesDetections", "American Crow", "2025-03-07", "", 1).Return(int64(1), nil)
+			},
+			expectedStatus: http.StatusOK,
+			expectedCount:  1,
+			checkResponse: func(t *testing.T, testName string, rec *httptest.ResponseRecorder) {
+				t.Helper()
+				detections, _ := decodePaginated(t, rec.Body.Bytes())
+				assert.Len(t, detections, 1)
+			},
+		},
+		// Auto-inference: search param without queryType should infer queryType=search
+		{
+			name: "Search param without queryType infers search query",
+			queryParams: map[string]string{
+				"search":     "Crow",
+				"numResults": "10",
+				"offset":     "0",
+			},
+			mockSetup: func(m *mock.Mock) {
+				m.On("SearchNotes", "Crow", false, 10, 0).Return(mockNotes[:1], int64(1), nil)
+			},
+			expectedStatus: http.StatusOK,
+			expectedCount:  1,
+			checkResponse: func(t *testing.T, testName string, rec *httptest.ResponseRecorder) {
+				t.Helper()
+				detections, _ := decodePaginated(t, rec.Body.Bytes())
+				assert.Len(t, detections, 1)
+			},
+		},
+		// Date param without queryType should route through advanced search
+		{
+			name: "Date param without queryType uses advanced search",
+			queryParams: map[string]string{
+				"date":       "2025-03-07",
+				"numResults": "10",
+				"offset":     "0",
+			},
+			mockSetup: func(m *mock.Mock) {
+				m.On("SearchNotesAdvanced", mock.AnythingOfType("*datastore.AdvancedSearchFilters")).
+					Return(mockNotes[:1], int64(1), nil)
+			},
+			expectedStatus: http.StatusOK,
+			expectedCount:  1,
+			checkResponse: func(t *testing.T, testName string, rec *httptest.ResponseRecorder) {
+				t.Helper()
+				detections, _ := decodePaginated(t, rec.Body.Bytes())
+				assert.Len(t, detections, 1)
+			},
+		},
+		// limit as alias for numResults
+		{
+			name: "Limit param as alias for numResults",
+			queryParams: map[string]string{
+				"queryType": "all",
+				"limit":     "5",
+				"offset":    "0",
+			},
+			mockSetup: func(m *mock.Mock) {
+				m.On("SearchNotes", "", false, 5, 0).Return(mockNotes, int64(2), nil)
+			},
+			expectedStatus: http.StatusOK,
+			expectedCount:  2,
+			checkResponse: func(t *testing.T, testName string, rec *httptest.ResponseRecorder) {
+				t.Helper()
+				detections, _ := decodePaginated(t, rec.Body.Bytes())
+				assert.Len(t, detections, 2)
+			},
+		},
+		// numResults takes precedence over limit
+		{
+			name: "numResults takes precedence over limit alias",
+			queryParams: map[string]string{
+				"queryType":  "all",
+				"numResults": "10",
+				"limit":      "5",
+				"offset":     "0",
+			},
+			mockSetup: func(m *mock.Mock) {
+				m.On("SearchNotes", "", false, 10, 0).Return(mockNotes, int64(2), nil)
+			},
+			expectedStatus: http.StatusOK,
+			expectedCount:  2,
+			checkResponse: func(t *testing.T, testName string, rec *httptest.ResponseRecorder) {
+				t.Helper()
+				detections, _ := decodePaginated(t, rec.Body.Bytes())
+				assert.Len(t, detections, 2)
 			},
 		},
 	}
@@ -930,6 +1031,118 @@ func TestDeleteDetection(t *testing.T) {
 	}
 }
 
+// TestDeleteDetectionRemovesFiles verifies that deleting a detection also
+// removes the associated audio clip and spectrogram files from disk.
+func TestDeleteDetectionRemovesFiles(t *testing.T) {
+	e, mockDS, controller := setupTestEnvironment(t)
+
+	// Create a subdirectory structure matching real clip paths
+	baseDir := controller.SFS.BaseDir()
+	clipDir := filepath.Join(baseDir, "2025", "01", "15")
+	require.NoError(t, os.MkdirAll(clipDir, 0o750))
+
+	clipFile := "Eurasian_Blue_Tit_85p_20250115T100000Z.wav"
+	clipPath := filepath.Join(clipDir, clipFile)
+
+	// Create the audio clip file
+	require.NoError(t, os.WriteFile(clipPath, []byte("fake-audio"), 0o600))
+
+	// Create spectrogram files in the naming patterns used by the API
+	baseName := "Eurasian_Blue_Tit_85p_20250115T100000Z"
+	spectrogramFiles := []string{
+		baseName + "_258px.png",
+		baseName + "_1026px.png",
+		baseName + "_1026px-legend.png",
+	}
+	for _, sf := range spectrogramFiles {
+		require.NoError(t, os.WriteFile(filepath.Join(clipDir, sf), []byte("fake-png"), 0o600))
+	}
+
+	// The ClipName stored in the DB is typically a relative path like
+	// "clips/2025/01/15/file.wav" or just the path relative to export dir.
+	// The controller normalizes it using the clips prefix.
+	relativeClipName := filepath.Join("2025", "01", "15", clipFile)
+
+	mockDS.On("Get", "10").Return(datastore.Note{
+		ID:       10,
+		Locked:   false,
+		ClipName: relativeClipName,
+	}, nil)
+	mockDS.On("Delete", "10").Return(nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v2/detections/10", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("10")
+
+	err := controller.DeleteDetection(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	// Verify the audio clip was removed
+	_, statErr := os.Stat(clipPath)
+	assert.True(t, os.IsNotExist(statErr), "audio clip file should have been removed")
+
+	// Verify spectrogram files were removed
+	for _, sf := range spectrogramFiles {
+		_, statErr := os.Stat(filepath.Join(clipDir, sf))
+		assert.True(t, os.IsNotExist(statErr), "spectrogram file %s should have been removed", sf)
+	}
+
+	mockDS.AssertExpectations(t)
+}
+
+// TestDeleteDetectionMissingFilesNoError verifies that deleting a detection
+// succeeds even when the associated files are already missing from disk.
+func TestDeleteDetectionMissingFilesNoError(t *testing.T) {
+	e, mockDS, controller := setupTestEnvironment(t)
+
+	mockDS.On("Get", "20").Return(datastore.Note{
+		ID:       20,
+		Locked:   false,
+		ClipName: "2025/01/15/nonexistent.wav",
+	}, nil)
+	mockDS.On("Delete", "20").Return(nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v2/detections/20", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("20")
+
+	err := controller.DeleteDetection(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	mockDS.AssertExpectations(t)
+}
+
+// TestDeleteDetectionEmptyClipName verifies that deleting a detection with
+// no clip name still succeeds (no file removal attempted).
+func TestDeleteDetectionEmptyClipName(t *testing.T) {
+	e, mockDS, controller := setupTestEnvironment(t)
+
+	mockDS.On("Get", "30").Return(datastore.Note{
+		ID:       30,
+		Locked:   false,
+		ClipName: "",
+	}, nil)
+	mockDS.On("Delete", "30").Return(nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v2/detections/30", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("30")
+
+	err := controller.DeleteDetection(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	mockDS.AssertExpectations(t)
+}
+
 // TestReviewDetection tests the ReviewDetection endpoint
 func TestReviewDetection(t *testing.T) {
 	// Setup
@@ -1146,11 +1359,11 @@ func TestLockDetection(t *testing.T) {
 	}
 }
 
-// clearExcludedSpeciesList is a test helper that clears the global excluded species list
-// to ensure test isolation. Call this at the beginning of tests that check list state.
-func clearExcludedSpeciesList(t *testing.T) {
+// clearExcludedSpeciesList is a test helper that clears the excluded species list
+// on the given settings to ensure test isolation. Call this at the beginning of
+// tests that check list state.
+func clearExcludedSpeciesList(t *testing.T, settings *conf.Settings) {
 	t.Helper()
-	settings := conf.GetSettings()
 	settings.Realtime.Species.Exclude = []string{}
 }
 
@@ -1159,7 +1372,7 @@ func TestIgnoreSpecies(t *testing.T) {
 	// Test cases for error scenarios
 	t.Run("Error cases", func(t *testing.T) {
 		e, _, controller := setupTestEnvironment(t)
-		clearExcludedSpeciesList(t)
+		clearExcludedSpeciesList(t, controller.Settings)
 
 		errorCases := []struct {
 			name           string
@@ -1212,7 +1425,7 @@ func TestIgnoreSpecies(t *testing.T) {
 	// Test toggle behavior: add then remove
 	t.Run("Toggle behavior - add species", func(t *testing.T) {
 		e, _, controller := setupTestEnvironment(t)
-		clearExcludedSpeciesList(t)
+		clearExcludedSpeciesList(t, controller.Settings)
 
 		// First request: add species (should not be in list initially)
 		req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
@@ -1235,7 +1448,7 @@ func TestIgnoreSpecies(t *testing.T) {
 
 	t.Run("Toggle behavior - remove species", func(t *testing.T) {
 		e, _, controller := setupTestEnvironment(t)
-		clearExcludedSpeciesList(t)
+		clearExcludedSpeciesList(t, controller.Settings)
 
 		// First, add the species
 		req1 := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
@@ -1275,7 +1488,7 @@ func TestIgnoreSpecies(t *testing.T) {
 
 	t.Run("Multiple toggle operations", func(t *testing.T) {
 		e, _, controller := setupTestEnvironment(t)
-		clearExcludedSpeciesList(t)
+		clearExcludedSpeciesList(t, controller.Settings)
 		speciesName := "Northern Cardinal"
 
 		// Perform add-remove-add cycle
@@ -1300,7 +1513,7 @@ func TestIgnoreSpecies(t *testing.T) {
 
 	t.Run("Special characters in species name", func(t *testing.T) {
 		e, _, controller := setupTestEnvironment(t)
-		clearExcludedSpeciesList(t)
+		clearExcludedSpeciesList(t, controller.Settings)
 
 		// Test with special characters (properly JSON encoded)
 		// Note: Use proper JSON encoding for special chars
@@ -1328,7 +1541,7 @@ func TestIgnoreSpecies(t *testing.T) {
 
 	t.Run("Long species name", func(t *testing.T) {
 		e, _, controller := setupTestEnvironment(t)
-		clearExcludedSpeciesList(t)
+		clearExcludedSpeciesList(t, controller.Settings)
 
 		longName := strings.Repeat("Very Long Bird Name ", 50)
 		req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
@@ -1352,7 +1565,7 @@ func TestIgnoreSpecies(t *testing.T) {
 func TestGetExcludedSpecies(t *testing.T) {
 	t.Run("Empty excluded list", func(t *testing.T) {
 		e, _, controller := setupTestEnvironment(t)
-		clearExcludedSpeciesList(t)
+		clearExcludedSpeciesList(t, controller.Settings)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v2/detections/ignored", http.NoBody)
 		rec := httptest.NewRecorder()
@@ -1371,11 +1584,11 @@ func TestGetExcludedSpecies(t *testing.T) {
 
 	t.Run("Excluded list with species", func(t *testing.T) {
 		e, _, controller := setupTestEnvironment(t)
-		clearExcludedSpeciesList(t)
+		clearExcludedSpeciesList(t, controller.Settings)
 
 		// First add some species
-		species := []string{"American Crow", "Red-bellied Woodpecker", "Blue Jay"}
-		for _, s := range species {
+		speciesList := []string{"American Crow", "Red-bellied Woodpecker", "Blue Jay"}
+		for _, s := range speciesList {
 			req := httptest.NewRequest(http.MethodPost, "/api/v2/detections/ignore",
 				strings.NewReader(`{"common_name": "`+s+`"}`))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -1398,12 +1611,12 @@ func TestGetExcludedSpecies(t *testing.T) {
 		err = json.Unmarshal(rec.Body.Bytes(), &response)
 		require.NoError(t, err)
 		assert.Equal(t, 3, response.Count)
-		assert.ElementsMatch(t, species, response.Species)
+		assert.ElementsMatch(t, speciesList, response.Species)
 	})
 
 	t.Run("Excluded list reflects toggle operations", func(t *testing.T) {
 		e, _, controller := setupTestEnvironment(t)
-		clearExcludedSpeciesList(t)
+		clearExcludedSpeciesList(t, controller.Settings)
 
 		// Add two species
 		for _, s := range []string{"Species A", "Species B"} {
@@ -1446,7 +1659,7 @@ func TestGetExcludedSpecies(t *testing.T) {
 // TestIgnoreSpeciesConcurrency tests concurrent access to the IgnoreSpecies endpoint
 func TestIgnoreSpeciesConcurrency(t *testing.T) {
 	e, _, controller := setupTestEnvironment(t)
-	clearExcludedSpeciesList(t)
+	clearExcludedSpeciesList(t, controller.Settings)
 
 	// Use WaitGroup.Go() for automatic Add/Done management (Go 1.25+)
 	var wg sync.WaitGroup
@@ -2056,4 +2269,69 @@ func TestTrueConcurrentPlatformSpecific(t *testing.T) {
 	assert.GreaterOrEqual(t, conflicts, int32(0), "Some requests should get conflict status")
 	assert.Equal(t, int32(0), failures, "There should be no unexpected failures")
 	assert.Equal(t, int32(numConcurrent), successes+conflicts, "All requests should either succeed or get conflict") // #nosec G115 -- numConcurrent is a small test constant (3-10), no overflow risk
+}
+
+// TestApplySpeciesTrackingMetadata_NoveltyFlags verifies that the isNewSpecies,
+// isNewThisYear, and isNewThisSeason flags are true only when the detection date
+// matches the species' first-seen date for each period. Regression test for Forgejo #98.
+func TestApplySpeciesTrackingMetadata_NoveltyFlags(t *testing.T) {
+	t.Parallel()
+	t.Attr("component", "detections")
+	t.Attr("type", "unit")
+	t.Attr("feature", "novelty-flags")
+
+	settings := &conf.SpeciesTrackingSettings{
+		Enabled:              true,
+		NewSpeciesWindowDays: 30,
+		SyncIntervalMinutes:  60,
+		YearlyTracking:       conf.YearlyTrackingSettings{Enabled: true, WindowDays: 30},
+		SeasonalTracking:     conf.SeasonalTrackingSettings{Enabled: true, WindowDays: 30},
+	}
+
+	tracker := species.NewTrackerFromSettings(nil, settings)
+
+	// Seed the tracker: species first seen on 2026-03-20
+	_, _ = tracker.CheckAndUpdateSpecies("Parus major", time.Date(2026, 3, 20, 8, 0, 0, 0, time.Local))
+
+	controller := &Controller{
+		Processor: &processor.Processor{
+			NewSpeciesTracker: tracker,
+		},
+	}
+
+	tests := []struct {
+		name            string
+		detectionDate   string
+		wantNewSpecies  bool
+		wantNewThisYear bool
+	}{
+		{
+			name:            "detection on first-seen date is new",
+			detectionDate:   "2026-03-20",
+			wantNewSpecies:  true,
+			wantNewThisYear: true,
+		},
+		{
+			name:            "detection on later date is not new",
+			detectionDate:   "2026-03-21",
+			wantNewSpecies:  false,
+			wantNewThisYear: false,
+		},
+		{
+			name:            "detection on much later date is not new",
+			detectionDate:   "2026-06-15",
+			wantNewSpecies:  false,
+			wantNewThisYear: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var det DetectionResponse
+			controller.applySpeciesTrackingMetadata(&det, "Parus major", tt.detectionDate)
+			assert.Equal(t, tt.wantNewSpecies, det.IsNewSpecies, "isNewSpecies for date %s", tt.detectionDate)
+			assert.Equal(t, tt.wantNewThisYear, det.IsNewThisYear, "isNewThisYear for date %s", tt.detectionDate)
+		})
+	}
 }

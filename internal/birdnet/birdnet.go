@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -19,10 +20,9 @@ import (
 	"github.com/tphakala/birdnet-go/internal/cpuspec"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/errors"
+	"github.com/tphakala/birdnet-go/internal/inference"
 	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/telemetry"
-	tflite "github.com/tphakala/go-tflite"
-	"github.com/tphakala/go-tflite/delegates/xnnpack"
 )
 
 // Default model version for the embedded model
@@ -40,16 +40,16 @@ type speciesCacheEntry struct {
 
 // BirdNET struct represents the BirdNET model with interpreters and configuration.
 type BirdNET struct {
-	AnalysisInterpreter *tflite.Interpreter
-	RangeInterpreter    *tflite.Interpreter
-	Settings            *conf.Settings
-	ModelInfo           ModelInfo           // Information about the current model
-	TaxonomyMap         TaxonomyMap         // Mapping of species codes to names and vice versa
-	ScientificIndex     ScientificNameIndex // Index for fast scientific name lookups
-	TaxonomyPath        string              // Path to custom taxonomy file, if used
-	mu                  sync.Mutex
-	resultsBuffer       []datastore.Results // Pre-allocated buffer for results to reduce allocations
-	confidenceBuffer    []float32           // Pre-allocated buffer for confidence values to reduce allocations
+	classifier       inference.Classifier  // species classification backend
+	rangeFilter      inference.RangeFilter // geographic range filter backend (may be nil)
+	Settings         *conf.Settings
+	ModelInfo        ModelInfo           // Information about the current model
+	TaxonomyMap      TaxonomyMap         // Mapping of species codes to names and vice versa
+	ScientificIndex  ScientificNameIndex // Index for fast scientific name lookups
+	TaxonomyPath     string              // Path to custom taxonomy file, if used
+	mu               sync.Mutex
+	resultsBuffer    []datastore.Results // Pre-allocated buffer for results to reduce allocations
+	confidenceBuffer []float32           // Pre-allocated buffer for confidence values to reduce allocations
 
 	// Species occurrence cache to avoid repeated GetProbableSpecies calls within same day
 	speciesCacheMu sync.RWMutex
@@ -78,10 +78,11 @@ func NewBirdNET(settings *conf.Settings) (*BirdNET, error) {
 	var err error
 	bn.ModelInfo, err = DetermineModelInfo(modelIdentifier)
 	if err != nil {
-		return nil, errors.Newf("BirdNET: failed to determine model information: %w", err).
+		return nil, errors.New(err).
 			Component("birdnet").
 			Category(errors.CategoryModelInit).
 			ModelContext(settings.BirdNET.ModelPath, modelIdentifier).
+			Context("operation", "determine_model_info").
 			Context("model_identifier", modelIdentifier).
 			Build()
 	}
@@ -89,35 +90,41 @@ func NewBirdNET(settings *conf.Settings) (*BirdNET, error) {
 	// Load taxonomy data
 	bn.TaxonomyMap, bn.ScientificIndex, err = LoadTaxonomyData(bn.TaxonomyPath)
 	if err != nil {
-		return nil, errors.Newf("BirdNET: failed to load taxonomy data: %w", err).
+		return nil, errors.New(err).
 			Component("birdnet").
 			Category(errors.CategoryModelInit).
+			Context("operation", "load_taxonomy").
 			Context("taxonomy_path", bn.TaxonomyPath).
 			Build()
 	}
 
-	if err := bn.initializeModel(); err != nil {
-		return nil, errors.Newf("BirdNET: failed to initialize analysis model: %w", err).
+	// Load labels before model initialization — ONNX models require labels
+	// at construction time for output dimension validation.
+	if err := bn.loadLabels(); err != nil {
+		return nil, errors.New(err).
 			Component("birdnet").
 			Category(errors.CategoryModelInit).
+			Context("operation", "load_labels").
+			ModelContext(settings.BirdNET.ModelPath, modelIdentifier).
+			Context("locale", settings.BirdNET.Locale).
+			Build()
+	}
+
+	if err := bn.initializeModel(); err != nil {
+		return nil, errors.New(err).
+			Component("birdnet").
+			Category(errors.CategoryModelInit).
+			Context("operation", "initialize_model").
 			ModelContext(settings.BirdNET.ModelPath, modelIdentifier).
 			Build()
 	}
 
 	if err := bn.initializeMetaModel(); err != nil {
-		return nil, errors.Newf("BirdNET: failed to initialize range filter model: %w", err).
+		return nil, errors.New(err).
 			Component("birdnet").
 			Category(errors.CategoryModelInit).
+			Context("operation", "initialize_range_filter").
 			ModelContext(settings.BirdNET.ModelPath, modelIdentifier).
-			Build()
-	}
-
-	if err := bn.loadLabels(); err != nil {
-		return nil, errors.Newf("BirdNET: failed to load species labels: %w", err).
-			Component("birdnet").
-			Category(errors.CategoryModelInit).
-			ModelContext(settings.BirdNET.ModelPath, modelIdentifier).
-			Context("locale", settings.BirdNET.Locale).
 			Build()
 	}
 
@@ -138,9 +145,10 @@ func NewBirdNET(settings *conf.Settings) (*BirdNET, error) {
 
 	// Validate model and labels, which will also allocate the results buffer
 	if err := bn.validateModelAndLabels(); err != nil {
-		return nil, errors.Newf("BirdNET: model validation failed: %w", err).
+		return nil, errors.New(err).
 			Component("birdnet").
 			Category(errors.CategoryModelInit).
+			Context("operation", "validate_model_and_labels").
 			ModelContext(settings.BirdNET.ModelPath, bn.ModelInfo.ID).
 			Build()
 	}
@@ -148,8 +156,26 @@ func NewBirdNET(settings *conf.Settings) (*BirdNET, error) {
 	return bn, nil
 }
 
+// isONNXModel returns true if the model path points to an ONNX model file.
+// Expands environment variables before checking the extension.
+func isONNXModel(path string) bool {
+	expanded := os.ExpandEnv(path)
+	return strings.HasSuffix(strings.ToLower(expanded), ".onnx")
+}
+
 // initializeModel loads and initializes the primary BirdNET model.
+// Dispatches to ONNX or TFLite backend based on the model file extension.
 func (bn *BirdNET) initializeModel() error {
+	// If model path ends with .onnx, use the ONNX backend
+	if isONNXModel(bn.Settings.BirdNET.ModelPath) {
+		return bn.initializeONNXModel()
+	}
+
+	return bn.initializeTFLiteModel()
+}
+
+// initializeTFLiteModel loads and initializes a TFLite model as the classifier backend.
+func (bn *BirdNET) initializeTFLiteModel() error {
 	start := time.Now()
 
 	modelData, err := bn.loadModel()
@@ -161,9 +187,19 @@ func (bn *BirdNET) initializeModel() error {
 			Build()
 	}
 
-	model := tflite.NewModel(modelData)
-	if model == nil {
-		return errors.Newf("cannot load TensorFlow Lite model").
+	log := GetLogger()
+	classifier, threads, err := inference.NewTFLiteClassifier(modelData, inference.TFLiteClassifierOptions{
+		Threads:    bn.Settings.BirdNET.Threads,
+		UseXNNPACK: bn.Settings.BirdNET.UseXNNPACK,
+		ErrorFunc: func(msg string) {
+			log.Error("TFLite error", logger.String("message", msg))
+		},
+		WarnFunc: func(msg string) {
+			log.Warn(msg, logger.String("tflite_download", "https://github.com/tphakala/tflite_c/releases/tag/v2.17.1"))
+		},
+	})
+	if err != nil {
+		return errors.New(err).
 			Category(errors.CategoryModelInit).
 			ModelContext(bn.Settings.BirdNET.ModelPath, bn.ModelInfo.ID).
 			Context("model_size_mb", len(modelData)/1024/1024).
@@ -172,44 +208,7 @@ func (bn *BirdNET) initializeModel() error {
 			Build()
 	}
 
-	// Determine the number of threads for the interpreter based on settings and system capacity.
-	threads := bn.determineThreadCount(bn.Settings.BirdNET.Threads)
-
-	// Configure interpreter options.
-	options := tflite.NewInterpreterOptions()
-
-	// Try to use XNNPACK delegate if enabled in settings
-	log := GetLogger()
-	if bn.Settings.BirdNET.UseXNNPACK {
-		delegate := xnnpack.New(xnnpack.DelegateOptions{NumThreads: int32(max(1, threads-1))}) //nolint:gosec // G115: thread count bounded by CPU count, safe conversion
-		if delegate == nil {
-			log.Warn("Failed to create XNNPACK delegate, falling back to default CPU",
-				logger.String("tflite_download", "https://github.com/tphakala/tflite_c/releases/tag/v2.17.1"))
-			options.SetNumThread(threads)
-		} else {
-			options.AddDelegate(delegate)
-			options.SetNumThread(1)
-		}
-	} else {
-		options.SetNumThread(threads)
-	}
-
-	options.SetErrorReporter(func(msg string, user_data any) {
-		GetLogger().Error("TFLite error", logger.String("message", msg))
-	}, nil)
-
-	// Create and allocate the TensorFlow Lite interpreter.
-	bn.AnalysisInterpreter = tflite.NewInterpreter(model, options)
-	if bn.AnalysisInterpreter == nil {
-		return fmt.Errorf("cannot create interpreter")
-	}
-	if status := bn.AnalysisInterpreter.AllocateTensors(); status != tflite.OK {
-		return fmt.Errorf("tensor allocation failed")
-	}
-
-	// Force garbage collection to reclaim memory from model loading
-	// The model data is no longer needed as TFLite has created its own internal copy
-	runtime.GC()
+	bn.classifier = classifier
 
 	// Update model version based on custom model path if provided
 	if bn.Settings.BirdNET.ModelPath != "" {
@@ -327,6 +326,16 @@ func (bn *BirdNET) getMetaModelData() ([]byte, error) {
 
 // initializeMetaModel loads and initializes the meta model used for range filtering.
 func (bn *BirdNET) initializeMetaModel() error {
+	// If range filter model path ends with .onnx, use the ONNX backend
+	if isONNXModel(bn.Settings.BirdNET.RangeFilter.ModelPath) {
+		return bn.initializeONNXMetaModel()
+	}
+
+	return bn.initializeTFLiteMetaModel()
+}
+
+// initializeTFLiteMetaModel loads and initializes a TFLite range filter model.
+func (bn *BirdNET) initializeTFLiteMetaModel() error {
 	start := time.Now()
 
 	metaModelData, err := bn.getMetaModelData()
@@ -334,71 +343,20 @@ func (bn *BirdNET) initializeMetaModel() error {
 		return err
 	}
 
-	model := tflite.NewModel(metaModelData)
-	if model == nil {
-		return errors.Newf("cannot load meta model from embedded data").
-			Category(errors.CategoryModelLoad).
-			Context("model_type", "range_filter").
-			Context("range_filter_model", bn.Settings.BirdNET.RangeFilter.Model).
-			Timing("meta-model-load", time.Since(start)).
-			Build()
-	}
-
-	// Meta model requires only one CPU.
-	options := tflite.NewInterpreterOptions()
-	options.SetNumThread(1)
-	options.SetErrorReporter(func(msg string, user_data any) {
+	rangeFilter, err := inference.NewTFLiteRangeFilter(metaModelData, func(msg string) {
 		GetLogger().Error("TFLite meta model error", logger.String("message", msg))
-	}, nil)
-
-	// Create and allocate the TensorFlow Lite interpreter for the meta model.
-	bn.RangeInterpreter = tflite.NewInterpreter(model, options)
-	if bn.RangeInterpreter == nil {
-		return errors.Newf("cannot create meta model interpreter").
+	})
+	if err != nil {
+		return errors.New(err).
 			Category(errors.CategoryModelInit).
 			Context("model_type", "range_filter").
 			Context("range_filter_model", bn.Settings.BirdNET.RangeFilter.Model).
 			Timing("meta-model-init", time.Since(start)).
 			Build()
 	}
-	if status := bn.RangeInterpreter.AllocateTensors(); status != tflite.OK {
-		return errors.Newf("tensor allocation failed for meta model: %v", status).
-			Category(errors.CategoryModelInit).
-			Context("model_type", "range_filter").
-			Context("status_code", status).
-			Timing("meta-model-allocate", time.Since(start)).
-			Build()
-	}
 
-	// Force garbage collection to reclaim memory from meta model loading
-	// The model data is no longer needed as TFLite has created its own internal copy
-	runtime.GC()
-
+	bn.rangeFilter = rangeFilter
 	return nil
-}
-
-// determineThreadCount calculates the appropriate number of threads to use based on settings and system capabilities.
-func (bn *BirdNET) determineThreadCount(configuredThreads int) int {
-	systemCpuCount := runtime.NumCPU()
-
-	// If threads are configured to 0, try to get optimal count from cpuspec
-	if configuredThreads == 0 {
-		spec := cpuspec.GetCPUSpec()
-		optimalThreads := spec.GetOptimalThreadCount()
-		if optimalThreads > 0 {
-			return min(optimalThreads, systemCpuCount)
-		}
-
-		// If cpuspec doesn't know the CPU, use all available cores
-		return systemCpuCount
-	}
-
-	// If threads are configured but exceed system CPU count, limit to system CPU count
-	if configuredThreads > systemCpuCount {
-		return systemCpuCount
-	}
-
-	return configuredThreads
 }
 
 // loadLabels extracts and loads labels from either the embedded files or an external file
@@ -438,22 +396,12 @@ func (bn *BirdNET) loadEmbeddedLabels() error {
 			Build()
 	}
 
-	// Check if fallback occurred and report to telemetry
+	// Check if fallback occurred and log at debug level
+	// Locale fallback is expected behavior (e.g., "en" -> "en-uk") and not an error
 	if result.FallbackOccurred {
 		bn.Debug("Label file fallback occurred: requested '%s', using '%s'", result.RequestedLocale, result.ActualLocale)
 
-		// ALWAYS report locale fallback to telemetry as a warning
-		// This is critical for tracking configuration issues
-		// Use deferred capture since BirdNET initializes before Sentry
-		telemetry.CaptureMessageDeferred(
-			fmt.Sprintf("Label file fallback: requested locale '%s' not available for model %s, using '%s'",
-				result.RequestedLocale, bn.ModelInfo.ID, result.ActualLocale),
-			sentry.LevelError,
-			"birdnet-label-loading",
-		)
-
-		// Also log so users see it immediately
-		GetLogger().Warn("Label file locale not available, using fallback",
+		GetLogger().Debug("Label file locale not available, using fallback",
 			logger.String("requested_locale", result.RequestedLocale),
 			logger.String("actual_locale", result.ActualLocale))
 	}
@@ -625,11 +573,18 @@ func (bn *BirdNET) getCachedSpeciesScores(targetDate time.Time) (map[string]floa
 	return out, nil
 }
 
-// Delete releases resources used by the TensorFlow Lite interpreters.
-// Note: With go-tflite v0.2.0+, interpreter cleanup is handled automatically by GC.
+// Delete releases resources used by the inference backends.
 func (bn *BirdNET) Delete() {
-	bn.AnalysisInterpreter = nil
-	bn.RangeInterpreter = nil
+	bn.mu.Lock()
+	if bn.classifier != nil {
+		bn.classifier.Close()
+		bn.classifier = nil
+	}
+	if bn.rangeFilter != nil {
+		bn.rangeFilter.Close()
+		bn.rangeFilter = nil
+	}
+	bn.mu.Unlock()
 	bn.clearSpeciesCache()
 }
 
@@ -827,18 +782,8 @@ func (bn *BirdNET) loadModel() ([]byte, error) {
 
 // validateModelAndLabels checks if the number of labels matches the model's output size
 func (bn *BirdNET) validateModelAndLabels() error {
-	// Get the output tensor to check its dimensions
-	outputTensor := bn.AnalysisInterpreter.GetOutputTensor(0)
-	if outputTensor == nil {
-		return errors.Newf("cannot get output tensor from model").
-			Category(errors.CategoryValidation).
-			ModelContext(bn.Settings.BirdNET.ModelPath, bn.ModelInfo.ID).
-			Context("interpreter_status", "failed").
-			Build()
-	}
-
-	// Get the number of classes from the model's output tensor
-	modelOutputSize := outputTensor.Dim(outputTensor.NumDims() - 1)
+	// Get the number of classes from the classifier backend
+	modelOutputSize := bn.classifier.NumSpecies()
 	labelCount := len(bn.Settings.BirdNET.Labels)
 
 	// Compare with the number of labels
@@ -875,21 +820,50 @@ func (bn *BirdNET) validateModelAndLabels() error {
 
 // ReloadModel safely reloads the BirdNET model and labels while handling ongoing analysis
 func (bn *BirdNET) ReloadModel() error {
-	bn.Debug("\033[33m🔒 Acquiring mutex for model reload\033[0m")
+	bn.Debug("Acquiring mutex for model reload")
 	bn.mu.Lock()
 	defer bn.mu.Unlock()
-	bn.Debug("\033[32m✅ Acquired mutex for model reload\033[0m")
+	bn.Debug("Acquired mutex for model reload")
 
-	// Store old interpreters to clean up after successful reload
-	oldAnalysisInterpreter := bn.AnalysisInterpreter
-	oldRangeInterpreter := bn.RangeInterpreter
+	// Snapshot all mutable state for transactional rollback on failure.
+	oldClassifier := bn.classifier
+	oldRangeFilter := bn.rangeFilter
+	oldModelInfo := bn.ModelInfo
+	oldTaxonomyMap := bn.TaxonomyMap
+	oldScientificIndex := bn.ScientificIndex
+	oldLabels := slices.Clone(bn.Settings.BirdNET.Labels)
+	oldLocale := bn.Settings.BirdNET.Locale
+
+	rollback := func() {
+		// Close any newly created backends that differ from the originals
+		// to avoid leaking resources during failed reloads
+		if bn.classifier != nil && bn.classifier != oldClassifier {
+			bn.classifier.Close()
+		}
+		if bn.rangeFilter != nil && bn.rangeFilter != oldRangeFilter {
+			bn.rangeFilter.Close()
+		}
+		bn.classifier = oldClassifier
+		bn.rangeFilter = oldRangeFilter
+		bn.ModelInfo = oldModelInfo
+		bn.TaxonomyMap = oldTaxonomyMap
+		bn.ScientificIndex = oldScientificIndex
+		bn.Settings.BirdNET.Labels = oldLabels
+		bn.Settings.BirdNET.Locale = oldLocale
+	}
 
 	// Re-determine model info if using a custom model path
 	if bn.Settings.BirdNET.ModelPath != "" {
 		var err error
 		bn.ModelInfo, err = DetermineModelInfo(bn.Settings.BirdNET.ModelPath)
 		if err != nil {
-			return fmt.Errorf("\033[31m❌ failed to determine model information: %w\033[0m", err)
+			rollback()
+			return errors.New(err).
+				Component("birdnet").
+				Category(errors.CategoryModelInit).
+				Context("operation", "reload_model").
+				Context("step", "determine_model_info").
+				Build()
 		}
 	}
 
@@ -897,48 +871,76 @@ func (bn *BirdNET) ReloadModel() error {
 	var err error
 	bn.TaxonomyMap, bn.ScientificIndex, err = LoadTaxonomyData(bn.TaxonomyPath)
 	if err != nil {
-		return fmt.Errorf("\033[31m❌ failed to reload taxonomy data: %w\033[0m", err)
+		rollback()
+		return errors.New(err).
+			Component("birdnet").
+			Category(errors.CategoryModelInit).
+			Context("operation", "reload_model").
+			Context("step", "reload_taxonomy").
+			Build()
 	}
-	bn.Debug("\033[32m✅ Taxonomy data reloaded successfully\033[0m")
+	bn.Debug("Taxonomy data reloaded successfully")
+
+	// Reload labels before model initialization — ONNX models require labels
+	// at construction time for output dimension validation.
+	if err := bn.loadLabels(); err != nil {
+		rollback()
+		return errors.New(err).
+			Component("birdnet").
+			Category(errors.CategoryModelInit).
+			Context("operation", "reload_model").
+			Context("step", "load_labels").
+			Build()
+	}
+	bn.Debug("Labels loaded successfully")
 
 	// Initialize new model
 	if err := bn.initializeModel(); err != nil {
-		return fmt.Errorf("\033[31m❌ failed to reload model: %w\033[0m", err)
+		rollback()
+		return errors.New(err).
+			Component("birdnet").
+			Category(errors.CategoryModelInit).
+			Context("operation", "reload_model").
+			Context("step", "initialize_model").
+			Build()
 	}
-	bn.Debug("\033[32m✅ Model initialized successfully\033[0m")
+	bn.Debug("Model initialized successfully")
 
 	// Initialize new meta model
 	if err := bn.initializeMetaModel(); err != nil {
-		// Restore the old interpreters (new ones will be GC'd)
-		bn.AnalysisInterpreter = oldAnalysisInterpreter
-		bn.RangeInterpreter = oldRangeInterpreter
-		return fmt.Errorf("\033[31m❌ failed to reload meta model: %w\033[0m", err)
+		rollback()
+		return errors.New(err).
+			Component("birdnet").
+			Category(errors.CategoryModelInit).
+			Context("operation", "reload_model").
+			Context("step", "initialize_meta_model").
+			Build()
 	}
-	bn.Debug("\033[32m✅ Meta model initialized successfully\033[0m")
-
-	// Reload labels
-	if err := bn.loadLabels(); err != nil {
-		// Restore the old interpreters (new ones will be GC'd)
-		bn.AnalysisInterpreter = oldAnalysisInterpreter
-		bn.RangeInterpreter = oldRangeInterpreter
-		return fmt.Errorf("\033[31m❌ failed to reload labels: %w\033[0m", err)
-	}
-	bn.Debug("\033[32m✅ Labels loaded successfully\033[0m")
+	bn.Debug("Meta model initialized successfully")
 
 	// Validate that the model and labels match
 	if err := bn.validateModelAndLabels(); err != nil {
-		// Restore the old interpreters (new ones will be GC'd)
-		bn.AnalysisInterpreter = oldAnalysisInterpreter
-		bn.RangeInterpreter = oldRangeInterpreter
-		return fmt.Errorf("\033[31m❌ model validation failed: %w\033[0m", err)
+		rollback()
+		return errors.New(err).
+			Component("birdnet").
+			Category(errors.CategoryModelInit).
+			Context("operation", "reload_model").
+			Context("step", "validate_model_labels").
+			Build()
 	}
 
-	// Old interpreters will be cleaned up by GC now that they're unreferenced
+	// Explicitly close old backends to release resources promptly
+	if oldClassifier != nil {
+		oldClassifier.Close()
+	}
+	if oldRangeFilter != nil {
+		oldRangeFilter.Close()
+	}
 
 	// Clear species cache as model/labels have changed
 	bn.clearSpeciesCache()
 
-	bn.Debug("\033[32m✅ Model reload completed successfully\033[0m")
+	bn.Debug("Model reload completed successfully")
 	return nil
 }
 
@@ -968,8 +970,12 @@ func (bn *BirdNET) GetSpeciesOccurrence(species string) float64 {
 
 // GetSpeciesOccurrenceAtTime returns the occurrence probability for a species at a specific time
 func (bn *BirdNET) GetSpeciesOccurrenceAtTime(species string, detectionTime time.Time) float64 {
-	// Fast-path: if range interpreter is not initialized, return 0
-	if bn.RangeInterpreter == nil {
+	// Fast-path: if range filter is not initialized, return 0.
+	// Read under lock to avoid data race with Delete().
+	bn.mu.Lock()
+	hasRangeFilter := bn.rangeFilter != nil
+	bn.mu.Unlock()
+	if !hasRangeFilter {
 		return 0.0
 	}
 

@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+  import Modal from '$lib/desktop/components/ui/Modal.svelte';
   import { t } from '$lib/i18n';
   import { parseLocalDateString } from '$lib/utils/date';
-  import { X } from '@lucide/svelte';
 
   interface SpeciesData {
     common_name: string;
@@ -22,6 +23,31 @@
 
   let { species, isOpen, onClose }: Props = $props();
 
+  // Cache species data so content persists during the Modal close animation.
+  // Updated when a new species is provided, retained when species becomes null
+  // while isOpen transitions to false.
+  let cachedSpecies = $state<SpeciesData | null>(null);
+
+  // Clear stale cache when the modal opens so previous species data doesn't flash.
+  // The cache is only useful during the close transition (species becomes null while
+  // isOpen transitions to false), not during open.
+  let prevIsOpen = $state(false);
+  $effect(() => {
+    if (isOpen && !untrack(() => prevIsOpen)) {
+      cachedSpecies = null;
+    }
+    prevIsOpen = isOpen;
+  });
+
+  $effect(() => {
+    if (species) {
+      cachedSpecies = species;
+    }
+  });
+
+  // Use cached data for rendering, fall back to current prop
+  let displaySpecies = $derived(species ?? cachedSpecies);
+
   function formatPercentage(value: number): string {
     return (value * 100).toFixed(1) + '%';
   }
@@ -36,113 +62,76 @@
   function handleClose() {
     if (onClose) onClose();
   }
-
-  function handleOverlayClick(e: MouseEvent) {
-    // Close when clicking outside the dialog content
-    e.stopPropagation();
-    handleClose();
-  }
-
-  function stopPropagation(e: MouseEvent) {
-    e.stopPropagation();
-  }
-
-  function stopKeyPropagation(e: KeyboardEvent) {
-    e.stopPropagation();
-  }
-
-  function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
-      handleClose();
-    }
-  }
-
-  $effect(() => {
-    if (isOpen) {
-      document.addEventListener('keydown', handleKeydown);
-      return () => {
-        document.removeEventListener('keydown', handleKeydown);
-      };
-    }
-  });
 </script>
 
-{#if isOpen && species}
-  <!-- Accessible modal overlay -->
-  <div
-    class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-[var(--color-base-200)]/70"
-    role="dialog"
-    aria-modal="true"
-    aria-label={species.common_name}
-    tabindex="-1"
-    onclick={handleOverlayClick}
-    onkeydown={handleKeydown}
-  >
-    <!-- Bottom sheet on mobile, centered dialog on larger screens -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="bg-[var(--color-base-100)] w-full sm:max-w-md sm:rounded-xl sm:shadow-xl sm:my-8 rounded-t-2xl"
-      style:max-height="80vh"
-      onclick={stopPropagation}
-      onkeydown={stopKeyPropagation}
-    >
-      <!-- Header -->
-      <div class="flex items-center justify-between p-4 border-b border-[var(--color-base-300)]">
+<Modal
+  isOpen={isOpen && displaySpecies !== null}
+  title={displaySpecies?.common_name ?? ''}
+  size="md"
+  type="default"
+  onClose={handleClose}
+  className="sm:modal-middle"
+>
+  {#snippet header()}
+    {#if displaySpecies}
+      <div class="flex items-center justify-between">
         <div class="min-w-0">
-          <h2 class="font-bold text-lg truncate">{species.common_name}</h2>
+          <h3 id="modal-title" class="font-bold text-lg truncate">
+            {displaySpecies.common_name}
+          </h3>
           <p class="text-sm text-[var(--color-base-content)] opacity-70 italic truncate">
-            {species.scientific_name}
+            {displaySpecies.scientific_name}
           </p>
         </div>
-        <button
-          class="btn btn-ghost btn-sm"
-          aria-label={t('common.aria.closeModal')}
-          onclick={handleClose}
-        >
-          <X class="size-5" />
-        </button>
       </div>
+    {/if}
+  {/snippet}
 
-      <!-- Content -->
-      <div class="p-4 space-y-3 overflow-y-auto">
-        {#if species.thumbnail_url}
-          <div class="w-full aspect-[4/3] rounded-xl overflow-hidden bg-[var(--color-base-300)]">
-            <img
-              src={species.thumbnail_url}
-              alt={species.common_name}
-              class="w-full h-full object-cover"
-            />
+  {#snippet children()}
+    {#if displaySpecies}
+      {#if displaySpecies.thumbnail_url}
+        <div class="w-full aspect-[4/3] rounded-xl overflow-hidden bg-[var(--color-base-300)]">
+          <img
+            src={displaySpecies.thumbnail_url}
+            alt={displaySpecies.common_name}
+            class="w-full h-full object-cover"
+          />
+        </div>
+      {/if}
+
+      <div class="grid grid-cols-2 gap-3 text-sm mt-3">
+        <div class="flex justify-between bg-[var(--color-base-200)] rounded px-3 py-2">
+          <span class="opacity-70">{t('analytics.species.card.detections')}</span>
+          <span class="font-semibold">{displaySpecies.count}</span>
+        </div>
+        <div class="flex justify-between bg-[var(--color-base-200)] rounded px-3 py-2">
+          <span class="opacity-70">{t('analytics.species.card.confidence')}</span>
+          <span class="font-semibold">{formatPercentage(displaySpecies.avg_confidence)}</span>
+        </div>
+        {#if displaySpecies.first_heard}
+          <div class="flex justify-between bg-[var(--color-base-200)] rounded px-3 py-2">
+            <span class="opacity-70">{t('analytics.species.headers.firstDetected')}</span>
+            <span class="font-semibold">{formatDate(displaySpecies.first_heard)}</span>
           </div>
         {/if}
-
-        <div class="grid grid-cols-2 gap-3 text-sm">
+        {#if displaySpecies.last_heard}
           <div class="flex justify-between bg-[var(--color-base-200)] rounded px-3 py-2">
-            <span class="opacity-70">{t('analytics.species.card.detections')}</span>
-            <span class="font-semibold">{species.count}</span>
+            <span class="opacity-70">{t('analytics.species.headers.lastDetected')}</span>
+            <span class="font-semibold">{formatDate(displaySpecies.last_heard)}</span>
           </div>
-          <div class="flex justify-between bg-[var(--color-base-200)] rounded px-3 py-2">
-            <span class="opacity-70">{t('analytics.species.card.confidence')}</span>
-            <span class="font-semibold">{formatPercentage(species.avg_confidence)}</span>
-          </div>
-          {#if species.first_heard}
-            <div class="flex justify-between bg-[var(--color-base-200)] rounded px-3 py-2">
-              <span class="opacity-70">{t('analytics.species.headers.firstDetected')}</span>
-              <span class="font-semibold">{formatDate(species.first_heard)}</span>
-            </div>
-          {/if}
-          {#if species.last_heard}
-            <div class="flex justify-between bg-[var(--color-base-200)] rounded px-3 py-2">
-              <span class="opacity-70">{t('analytics.species.headers.lastDetected')}</span>
-              <span class="font-semibold">{formatDate(species.last_heard)}</span>
-            </div>
-          {/if}
-        </div>
+        {/if}
       </div>
+    {/if}
+  {/snippet}
 
-      <!-- Footer -->
-      <div class="p-4 border-t border-[var(--color-base-300)]">
-        <button class="btn btn-primary w-full" onclick={handleClose}>{t('common.close')}</button>
-      </div>
-    </div>
-  </div>
-{/if}
+  {#snippet footer()}
+    <button
+      class="px-4 py-2 rounded-lg font-medium transition-colors w-full
+             bg-[var(--color-primary)] text-[var(--color-primary-content)]
+             hover:bg-[var(--color-primary)]/90"
+      onclick={handleClose}
+    >
+      {t('common.close')}
+    </button>
+  {/snippet}
+</Modal>

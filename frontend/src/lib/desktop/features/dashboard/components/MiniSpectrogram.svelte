@@ -144,7 +144,7 @@
       };
 
       const timeout = globalThis.setTimeout(() => {
-        signal.removeEventListener('abort', onAbort);
+        signal?.removeEventListener('abort', onAbort);
         sse.close();
         resolve(null);
       }, SOURCE_DISCOVERY_TIMEOUT);
@@ -161,7 +161,7 @@
             const sourceIds = Object.keys(data.levels);
             if (sourceIds.length > 0) {
               globalThis.clearTimeout(timeout);
-              signal.removeEventListener('abort', onAbort);
+              signal?.removeEventListener('abort', onAbort);
               sse.close();
               resolve(sourceIds[0]);
             }
@@ -379,9 +379,9 @@
     // eslint-disable-next-line security/detect-object-injection -- gainPresetIndex is a numeric index bounded by modulo
     const preset = GAIN_PRESETS[gainPresetIndex];
     spectro.setAudioOutput(preset.audio);
-    if (preset.audio) {
-      spectro.setGain(preset.db);
-    }
+    // Always update gain -- when muted (db: -Infinity), this resets the
+    // spectrogram visualization to 0 dB instead of leaving it at max gain.
+    spectro.setGain(preset.audio ? preset.db : 0);
   }
 
   // Diff incoming pending detections and queue new labels.

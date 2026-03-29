@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
+	"github.com/tphakala/birdnet-go/internal/audiocore"
 )
 
 // TestAudioLevelSSEDataFormat tests the AudioLevelSSEData struct marshaling
@@ -16,7 +16,7 @@ func TestAudioLevelSSEDataFormat(t *testing.T) {
 	t.Run("empty levels map", func(t *testing.T) {
 		data := AudioLevelSSEData{
 			Type:   "audio-level",
-			Levels: make(map[string]myaudio.AudioLevelData),
+			Levels: make(map[string]audiocore.AudioLevelData),
 		}
 
 		assert.Equal(t, "audio-level", data.Type)
@@ -26,7 +26,7 @@ func TestAudioLevelSSEDataFormat(t *testing.T) {
 	t.Run("single source", func(t *testing.T) {
 		data := AudioLevelSSEData{
 			Type: "audio-level",
-			Levels: map[string]myaudio.AudioLevelData{
+			Levels: map[string]audiocore.AudioLevelData{
 				"source1": {
 					Level:  45,
 					Name:   "Test Source",
@@ -44,7 +44,7 @@ func TestAudioLevelSSEDataFormat(t *testing.T) {
 	t.Run("multiple sources", func(t *testing.T) {
 		data := AudioLevelSSEData{
 			Type: "audio-level",
-			Levels: map[string]myaudio.AudioLevelData{
+			Levels: map[string]audiocore.AudioLevelData{
 				"audio_card_1": {
 					Level:  50,
 					Name:   "Audio Card",
@@ -67,7 +67,7 @@ func TestAudioLevelSSEDataFormat(t *testing.T) {
 // TestIsSourceInactive tests the source inactivity detection logic
 func TestIsSourceInactive(t *testing.T) {
 	// Create a minimal controller for testing
-	controller := &Controller{}
+	controller := &Controller{Settings: newValidTestSettings()}
 
 	t.Run("new source is active", func(t *testing.T) {
 		lastUpdate := make(map[string]time.Time)
@@ -121,11 +121,11 @@ func TestIsSourceInactive(t *testing.T) {
 
 // TestCheckSourceActivity tests the source activity checking for multiple sources
 func TestCheckSourceActivity(t *testing.T) {
-	controller := &Controller{}
+	controller := &Controller{Settings: newValidTestSettings()}
 
 	t.Run("no inactive sources", func(t *testing.T) {
 		now := time.Now()
-		levels := map[string]myaudio.AudioLevelData{
+		levels := map[string]audiocore.AudioLevelData{
 			"source1": {Level: 50, Name: "Source 1", Source: "source1"},
 		}
 		lastUpdate := map[string]time.Time{
@@ -142,7 +142,7 @@ func TestCheckSourceActivity(t *testing.T) {
 
 	t.Run("inactive source gets zeroed", func(t *testing.T) {
 		now := time.Now()
-		levels := map[string]myaudio.AudioLevelData{
+		levels := map[string]audiocore.AudioLevelData{
 			"source1": {Level: 50, Name: "Source 1", Source: "source1"},
 		}
 		lastUpdate := map[string]time.Time{
@@ -159,7 +159,7 @@ func TestCheckSourceActivity(t *testing.T) {
 
 	t.Run("already zero source not updated", func(t *testing.T) {
 		now := time.Now()
-		levels := map[string]myaudio.AudioLevelData{
+		levels := map[string]audiocore.AudioLevelData{
 			"source1": {Level: 0, Name: "Source 1", Source: "source1"},
 		}
 		lastUpdate := map[string]time.Time{
@@ -176,7 +176,7 @@ func TestCheckSourceActivity(t *testing.T) {
 
 // TestGetAnonymizedSourceNameFallback tests the fallback source name anonymization
 func TestGetAnonymizedSourceNameFallback(t *testing.T) {
-	controller := &Controller{}
+	controller := &Controller{Settings: newValidTestSettings()}
 
 	t.Run("audio card source", func(t *testing.T) {
 		name := controller.getAnonymizedSourceNameFallback("audio_card_default")

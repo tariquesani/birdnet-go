@@ -17,6 +17,9 @@ import (
 
 	"github.com/tphakala/birdnet-go/internal/analysis/jobqueue"
 	"github.com/tphakala/birdnet-go/internal/analysis/species"
+	"github.com/tphakala/birdnet-go/internal/audiocore"
+	"github.com/tphakala/birdnet-go/internal/audiocore/buffer"
+	"github.com/tphakala/birdnet-go/internal/audiocore/convert"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/birdweather"
 	"github.com/tphakala/birdnet-go/internal/conf"
@@ -25,7 +28,6 @@ import (
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/mqtt"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/notification"
 	"github.com/tphakala/birdnet-go/internal/observability"
 	"github.com/tphakala/birdnet-go/internal/privacy"
@@ -45,6 +47,12 @@ const (
 
 // DefaultFlushInterval is the interval for checking and flushing pending detections
 const DefaultFlushInterval = 1 * time.Second
+
+// MinJobQueueGracePeriod is the minimum time to wait for in-flight job queue
+// workers to finish during shutdown, even when the context is already expired.
+// This prevents closing the datastore while workers are mid-write, which would
+// cause errors writing to a closed database connection.
+const MinJobQueueGracePeriod = 500 * time.Millisecond
 
 // Processor represents the main processing unit for audio analysis.
 type Processor struct {
@@ -69,7 +77,9 @@ type Processor struct {
 	LastHumanDetection  map[string]time.Time    // keep track of human vocal per audio source
 	Metrics             *observability.Metrics
 	DynamicThresholds   map[string]*DynamicThreshold
-	thresholdsMutex     sync.RWMutex // Mutex to protect access to DynamicThresholds
+	thresholdsMutex     sync.RWMutex        // Mutex to protect access to DynamicThresholds
+	pendingResets       map[string]struct{} // Species names pending reset, protected by thresholdsMutex
+	pendingResetAll     bool                // True if a full reset is pending, protected by thresholdsMutex
 	pendingDetections   map[string]PendingDetection
 	pendingMutex        sync.RWMutex // RWMutex to protect access to pendingDetections (RLock for snapshots)
 	lastDogDetectionLog map[string]time.Time
@@ -84,6 +94,7 @@ type Processor struct {
 	flusherCancel       context.CancelFunc // Function to cancel flusher goroutine
 	preRenderer         PreRendererSubmit  // Spectrogram pre-renderer for background generation
 	preRendererOnce     sync.Once          // Ensures pre-renderer is initialized only once
+	startOnce           sync.Once          // Ensures Start() is called only once
 	// SSE related fields
 	SSEBroadcaster      func(note *datastore.Note, birdImage *imageprovider.BirdImage) error // Function to broadcast detection via SSE
 	sseBroadcasterMutex sync.RWMutex                                                         // Mutex to protect SSE broadcaster access
@@ -95,6 +106,15 @@ type Processor struct {
 	pendingFlushNotifsMu    sync.Mutex                           // Mutex to protect pendingFlushNotifs
 	lastBroadcastSnapshot   []SSEPendingDetection                // Last broadcast snapshot for change detection
 	lastBroadcastSnapshotMu sync.Mutex                           // Mutex to protect lastBroadcastSnapshot
+
+	// SourceRegistry provides access to registered audio sources (injected via SetRegistry).
+	registry   *audiocore.SourceRegistry
+	registryMu sync.RWMutex
+
+	// BufferMgr provides access to capture buffers for audio clip extraction.
+	// Set once during pipeline initialization (audio_pipeline_service.go) and never replaced;
+	// no synchronization needed for concurrent reads.
+	BufferMgr *buffer.Manager
 
 	// Backup system fields (optional)
 	backupManager   any // Use interface{} to avoid import cycle
@@ -390,6 +410,7 @@ func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, m
 		LastDogDetection:    make(map[string]time.Time),
 		LastHumanDetection:  make(map[string]time.Time),
 		DynamicThresholds:   make(map[string]*DynamicThreshold),
+		pendingResets:       make(map[string]struct{}),
 		pendingDetections:   make(map[string]PendingDetection),
 		lastDogDetectionLog: make(map[string]time.Time),
 		controlChan:         make(chan string, 10),  // Buffered channel to prevent blocking
@@ -443,17 +464,9 @@ func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, m
 	// Initialize species tracker if enabled
 	p.NewSpeciesTracker = initSpeciesTracker(settings, ds)
 
-	// Start the detection processor
-	p.startDetectionProcessor()
-
-	// Start the worker pool for action processing
-	p.startWorkerPool()
-
-	// Create context for pending detections flusher
-	p.flusherCtx, p.flusherCancel = context.WithCancel(context.Background())
-
-	// Start the held detection flusher
-	p.pendingDetectionsFlusher()
+	// NOTE: Background goroutines (detection processor, worker pool, flusher)
+	// are NOT started here. Call Start() after wiring BufferMgr and Registry
+	// to avoid a race where detections arrive before the buffer manager is set.
 
 	// Initialize BirdWeather client if enabled
 	p.initBirdWeatherClient(settings)
@@ -504,13 +517,32 @@ func New(settings *conf.Settings, ds datastore.Interface, bn *birdnet.BirdNET, m
 	return p
 }
 
-// Start goroutine to process detections from the queue
+// Start launches the background goroutines that process detections.
+// It must be called AFTER BufferMgr and Registry are wired — otherwise
+// detections arrive before the buffer manager is available and audio
+// clip export silently fails.
+func (p *Processor) Start() {
+	p.startOnce.Do(func() {
+		GetLogger().Info("Processor.Start() called — BufferMgr and Registry wired, launching detection goroutines",
+			logger.Bool("buffer_mgr_set", p.BufferMgr != nil),
+			logger.Bool("registry_set", p.Registry() != nil),
+			logger.String("operation", "processor_start"))
+
+		p.startDetectionProcessor()
+		p.startWorkerPool()
+
+		p.flusherCtx, p.flusherCancel = context.WithCancel(context.Background())
+		p.pendingDetectionsFlusher()
+	})
+}
+
+// startDetectionProcessor starts the goroutine that processes detections from the queue.
 func (p *Processor) startDetectionProcessor() {
 	// Add structured logging for detection processor startup
 	GetLogger().Info("Starting detection processor",
 		logger.String("operation", "detection_processor_startup"))
 	go func() {
-		// ResultsQueue is fed by myaudio.ProcessData()
+		// ResultsQueue is fed by analysis.ProcessData()
 		for item := range birdnet.ResultsQueue {
 			// Pass by value since we own the data (see queue.go ownership comment)
 			p.processDetections(item)
@@ -724,6 +756,21 @@ func (p *Processor) shouldFilterDetection(result datastore.Results, commonName, 
 		return true, 0 // Filter out human detections for privacy
 	}
 
+	// Check species exclusion filter (ignore list).
+	// This is the authoritative per-detection check. The range filter also excludes these
+	// species when building the included list, but that only works when the range filter
+	// model is active and location is configured. This check ensures excluded species are
+	// always filtered regardless of range filter state.
+	if isSpeciesExcluded(commonName, scientificName, p.Settings.Realtime.Species.Exclude) {
+		if p.Settings.Debug {
+			GetLogger().Debug("Detection filtered: species is on exclude list",
+				logger.String("species", result.Species),
+				logger.Float32("confidence", result.Confidence),
+				logger.String("operation", "species_exclusion_filter"))
+		}
+		return true, 0
+	}
+
 	// Determine confidence threshold
 	if p.Settings.Realtime.DynamicThreshold.Enabled {
 		// Check if this species has a custom user-configured threshold (> 0)
@@ -761,6 +808,18 @@ func (p *Processor) shouldFilterDetection(result datastore.Results, commonName, 
 	}
 
 	return false, confidenceThreshold
+}
+
+// isSpeciesExcluded checks if a species (by common or scientific name) matches any entry
+// in the exclude list. Matching is case-insensitive and supports either name form, consistent
+// with the range filter's matchesSpecies logic (see birdnet/range_filter.go).
+func isSpeciesExcluded(commonName, scientificName string, excludeList []string) bool {
+	for _, excluded := range excludeList {
+		if strings.EqualFold(commonName, excluded) || strings.EqualFold(scientificName, excluded) {
+			return true
+		}
+	}
+	return false
 }
 
 // createDetection creates a detection object with all necessary information
@@ -866,14 +925,14 @@ func (p *Processor) resolveAudioSource(source datastore.AudioSource) detection.A
 
 	// Try to get additional details from registry
 	// Use same lookup order as NewWithSpeciesInfo: connection string first, then ID
-	registry := myaudio.GetRegistry()
+	registry := p.Registry()
 	if registry != nil {
-		if existingSource, exists := registry.GetSourceByConnection(source.ID); exists {
+		if existingSource, exists := registry.GetByConnection(source.ID); exists {
 			audioSource.ID = existingSource.ID
 			audioSource.SafeString = existingSource.SafeString
 			audioSource.DisplayName = existingSource.DisplayName
 			audioSource.Type = detection.DetermineSourceType(existingSource.SafeString)
-		} else if existingSource, exists := registry.GetSourceByID(source.ID); exists {
+		} else if existingSource, exists := registry.Get(source.ID); exists {
 			audioSource.ID = existingSource.ID
 			audioSource.SafeString = existingSource.SafeString
 			audioSource.DisplayName = existingSource.DisplayName
@@ -1020,7 +1079,7 @@ func (p *Processor) buildClipPath(scientificName string, confidence float32, dur
 	timestamp := t.Format("20060102T150405Z")
 	year := t.Format("2006")
 	month := t.Format("01")
-	fileType := myaudio.GetFileExtension(p.Settings.Realtime.Audio.Export.Type)
+	fileType := convert.GetFileExtension(p.Settings.Realtime.Audio.Export.Type)
 
 	var filename string
 	if durationSeconds > 0 {
@@ -1510,8 +1569,7 @@ func (p *Processor) getDefaultActions(det *Detections) []Action {
 			Settings:          p.Settings,
 			EventTracker:      p.GetEventTracker(),
 			NewSpeciesTracker: tracker,
-			processor:         p, // Add processor reference for source name resolution
-			PreRenderer:       p.preRenderer,
+			processor:         p,            // Add processor reference for source name resolution
 			DetectionCtx:      detectionCtx, // Share context for downstream actions
 			Result:            det.Result,   // Domain model (single source of truth)
 			Results:           det.Results,  // Domain model - converted to legacy format at save time
@@ -1588,6 +1646,12 @@ func (p *Processor) getDefaultActions(det *Detections) []Action {
 	// - SSE/MQTT receive the correct detection ID for URL construction
 	// - No polling needed (eliminates the old 5-second sleep hack in SSE)
 	//
+	// IMPORTANT: Audio export is NOT included in this CompositeAction. It runs as a
+	// separate independent action to prevent slow FFmpeg encoding (especially on
+	// Raspberry Pi) from blocking SSE/MQTT broadcasts. The media API handles the
+	// race where a client requests audio before export completes, using server-side
+	// wait with retries and 503 + Retry-After responses.
+	//
 	// See: https://github.com/tphakala/birdnet-go/issues/1158 (race condition)
 	// See: https://github.com/tphakala/birdnet-go/issues/1748 (detection ID in MQTT)
 	var sequentialActions []Action
@@ -1612,6 +1676,16 @@ func (p *Processor) getDefaultActions(det *Detections) []Action {
 	} else if len(sequentialActions) == 1 {
 		// Only one action enabled, add it directly
 		actions = append(actions, sequentialActions[0])
+	}
+
+	// Add SaveAudioAction if audio export is enabled.
+	// This runs as an INDEPENDENT action (not inside the CompositeAction) so that
+	// slow audio encoding does not block the Database -> SSE -> MQTT pipeline.
+	// On resource-constrained hardware (RPi with SD cards), FFmpeg encoding can
+	// take 10-30+ seconds, which previously caused CompositeAction 30s timeouts
+	// (Sentry BIRDNET-GO-WD), preventing SSE/MQTT from ever firing.
+	if p.Settings.Realtime.Audio.Export.Enabled && databaseAction != nil {
+		actions = append(actions, p.buildSaveAudioAction(det, detectionCtx))
 	}
 
 	// Add BirdWeatherAction if enabled and client is initialized
@@ -1656,6 +1730,91 @@ func (p *Processor) getDefaultActions(det *Detections) []Action {
 	}
 
 	return actions
+}
+
+// buildSaveAudioAction creates a SaveAudioAction for the given detection.
+// It reads PCM data from the capture buffer eagerly (while the data is still
+// available) and returns an action that will encode and write the audio file
+// when executed by the job queue. This decouples the slow FFmpeg encoding
+// from the fast Database -> SSE -> MQTT pipeline.
+func (p *Processor) buildSaveAudioAction(det *Detections, detectionCtx *DetectionContext) *SaveAudioAction {
+	captureLength := p.Settings.Realtime.Audio.Export.Length
+	if !det.Result.EndTime.IsZero() && !det.Result.BeginTime.IsZero() {
+		preCapture := p.Settings.Realtime.Audio.Export.PreCapture
+		derivedLength := int(det.Result.EndTime.Sub(det.Result.BeginTime).Seconds()) + preCapture
+		if derivedLength > captureLength {
+			captureLength = derivedLength
+			GetLogger().Info("Using derived capture duration from detection time span",
+				logger.String("detection_id", det.CorrelationID),
+				logger.String("species", det.Result.Species.CommonName),
+				logger.Int("duration_seconds", captureLength),
+				logger.Int("configured_length", p.Settings.Realtime.Audio.Export.Length),
+				logger.String("operation", "extended_capture_audio_export"))
+		}
+	}
+
+	// Cap at capture buffer size to prevent reading beyond buffer bounds.
+	bufferCap := conf.DefaultCaptureBufferSeconds
+	if p.Settings.Realtime.ExtendedCapture.Enabled && p.Settings.Realtime.ExtendedCapture.CaptureBufferSeconds > 0 {
+		bufferCap = p.Settings.Realtime.ExtendedCapture.CaptureBufferSeconds
+	}
+	if captureLength > bufferCap {
+		GetLogger().Warn("Capping capture length at buffer size",
+			logger.String("detection_id", det.CorrelationID),
+			logger.Int("requested_seconds", captureLength),
+			logger.Int("buffer_seconds", bufferCap),
+			logger.String("operation", "capture_buffer_cap"))
+		captureLength = bufferCap
+	}
+
+	// Read PCM data from the capture buffer NOW, while the data is still in the
+	// ring buffer. By the time the job queue picks up the SaveAudioAction, the
+	// buffer may have been overwritten with newer audio data.
+	pcmData, err := p.readCaptureSegment(det.Result.AudioSource.ID, det.Result.BeginTime, captureLength)
+	if err != nil {
+		GetLogger().Error("Failed to read capture buffer for audio export",
+			logger.String("component", "analysis.processor.actions"),
+			logger.String("detection_id", det.CorrelationID),
+			logger.Error(err),
+			logger.String("source", det.Result.AudioSource.SafeString),
+			logger.Time("begin_time", det.Result.BeginTime),
+			logger.Int("duration_seconds", captureLength),
+			logger.String("operation", "capture_buffer_read_for_export"))
+		// Return an action with nil pcmData; Execute() will be a no-op
+		return &SaveAudioAction{
+			Settings:      p.Settings,
+			ClipName:      det.Result.ClipName,
+			NoteID:        det.Result.ID, // May be 0 here; updated after DB save via DetectionCtx
+			PreRenderer:   p.preRenderer,
+			DetectionCtx:  detectionCtx,
+			CorrelationID: det.CorrelationID,
+		}
+	}
+
+	return &SaveAudioAction{
+		Settings:      p.Settings,
+		ClipName:      det.Result.ClipName,
+		pcmData:       pcmData,
+		NoteID:        det.Result.ID, // May be 0 here; updated after DB save via DetectionCtx
+		PreRenderer:   p.preRenderer,
+		DetectionCtx:  detectionCtx,
+		CorrelationID: det.CorrelationID,
+	}
+}
+
+// readCaptureSegment reads PCM data from the audiocore capture buffer.
+// startTime is the segment start, duration is in seconds.
+func (p *Processor) readCaptureSegment(sourceID string, startTime time.Time, duration int) ([]byte, error) {
+	safeSource := privacy.SanitizeStreamUrl(sourceID)
+	if p.BufferMgr == nil {
+		return nil, fmt.Errorf("buffer manager not available for source %s", safeSource)
+	}
+	cb, err := p.BufferMgr.CaptureBuffer(sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("no capture buffer for source %s: %w", safeSource, err)
+	}
+	endTime := startTime.Add(time.Duration(duration) * time.Second)
+	return cb.ReadSegment(startTime, endTime)
 }
 
 // GetBwClient safely returns the current BirdWeather client
@@ -1794,19 +1953,38 @@ func (p *Processor) CleanupLogDeduplicator(staleAfter time.Duration) int {
 	return removed
 }
 
+// CleanupEventTracker removes stale entries from the event tracker's handler maps.
+func (p *Processor) CleanupEventTracker(staleAfter time.Duration) int {
+	p.eventTrackerMu.RLock()
+	tracker := p.EventTracker
+	p.eventTrackerMu.RUnlock()
+
+	if tracker == nil {
+		return 0
+	}
+	removed := tracker.Cleanup(staleAfter)
+	if removed > 0 {
+		GetLogger().Debug("Cleaned stale event tracker entries",
+			logger.Int("removed_count", removed),
+			logger.String("stale_after", staleAfter.String()),
+			logger.String("operation", "event_tracker_cleanup"))
+	}
+	return removed
+}
+
 // getDisplayNameForSource converts a source ID to user-friendly DisplayName
 // Falls back to sanitized source if lookup fails (prevents credential exposure)
 // TODO: Consider moving to AudioSource struct throughout the pipeline to eliminate this lookup
 func (p *Processor) getDisplayNameForSource(sourceID string) string {
-	registry := myaudio.GetRegistry()
+	registry := p.Registry()
 	if registry != nil {
 		// Try lookup by ID first
-		if source, exists := registry.GetSourceByID(sourceID); exists {
+		if source, exists := registry.Get(sourceID); exists {
 			return source.DisplayName
 		}
 
 		// Try lookup by connection string (handles legacy case)
-		if source, exists := registry.GetSourceByConnection(sourceID); exists {
+		if source, exists := registry.GetByConnection(sourceID); exists {
 			return source.DisplayName
 		}
 	}
@@ -1869,12 +2047,15 @@ func (p *Processor) ShutdownWithContext(ctx context.Context) error {
 	// Stop the job queue — use remaining context budget, not a hardcoded 30 seconds.
 	// Always send the stop signal even if the deadline has passed (remaining <= 0)
 	// so the queue's workers are notified and don't keep running after DB close.
+	// Enforce a minimum grace period so in-flight DB writes can complete before
+	// closeDataStore runs — a zero timeout would return immediately, risking
+	// writes to a closed database connection.
 	// Check ctx.Err() first to handle cancellation without deadline (WithCancel).
 	queueStopTimeout := 30 * time.Second
 	if ctx.Err() != nil {
-		queueStopTimeout = 0
+		queueStopTimeout = MinJobQueueGracePeriod
 	} else if deadline, ok := ctx.Deadline(); ok {
-		queueStopTimeout = max(time.Until(deadline), 0)
+		queueStopTimeout = max(time.Until(deadline), MinJobQueueGracePeriod)
 	}
 
 	if err := p.JobQueue.StopWithTimeout(queueStopTimeout); err != nil {
@@ -1938,25 +2119,15 @@ func (p *Processor) logDetectionResults(source string, rawCount, filteredCount i
 	shouldLog, reason := p.logDedup.ShouldLog(source, rawCount, filteredCount)
 
 	if shouldLog {
-		// Only log at INFO level when there are actual filtered detections
-		// This prevents log spam from empty analysis cycles
-		if filteredCount > 0 {
-			GetLogger().Info("Detection processing results",
-				logger.String("source", p.getDisplayNameForSource(source)),
-				logger.Int("raw_results_count", rawCount),
-				logger.Int("filtered_detections_count", filteredCount),
-				logger.String("log_reason", reason),
-				logger.String("operation", "process_detections_summary"))
-		} else {
-			// Log zero-detection cycles at DEBUG level for troubleshooting
-			// without flooding INFO logs with noise
-			GetLogger().Debug("Detection processing results",
-				logger.String("source", p.getDisplayNameForSource(source)),
-				logger.Int("raw_results_count", rawCount),
-				logger.Int("filtered_detections_count", 0),
-				logger.String("log_reason", reason),
-				logger.String("operation", "process_detections_summary"))
-		}
+		// Log all processing results at DEBUG level to avoid flooding console.
+		// Actual detections are logged at INFO when they become pending/confirmed
+		// detections (see "Created new pending detection" log message).
+		GetLogger().Debug("Detection processing results",
+			logger.String("source", p.getDisplayNameForSource(source)),
+			logger.Int("raw_results_count", rawCount),
+			logger.Int("filtered_detections_count", filteredCount),
+			logger.String("log_reason", reason),
+			logger.String("operation", "process_detections_summary"))
 	}
 }
 

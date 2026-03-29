@@ -15,11 +15,23 @@ export interface SentryConfig {
   version: string;
 }
 
+/** HTTP status codes for expected-flow errors (not bugs). */
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_FORBIDDEN = 403;
+const HTTP_CONFLICT = 409;
+
 /** API error shape matching ApiError from api.ts. */
 interface ApiErrorLike {
   message: string;
   status: number;
   isNetworkError: boolean;
+}
+
+/** Check whether an unknown value looks like an ApiError with an expected-flow status. */
+function isExpectedApiError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const status = (err as Record<string, unknown>).status;
+  return status === HTTP_UNAUTHORIZED || status === HTTP_FORBIDDEN || status === HTTP_CONFLICT;
 }
 
 /**
@@ -46,11 +58,11 @@ export function initSentry(config: SentryConfig): void {
 
 /**
  * Capture an API error with structured context.
- * Skips auth errors (401/403) as they are expected flow, not bugs.
+ * Skips expected-flow errors (401/403/409) as they are not bugs.
  */
 export function captureApiError(error: ApiErrorLike, context?: Record<string, string>): void {
-  // Skip auth-related errors — these are expected flow, not bugs
-  if (error.status === 401 || error.status === 403) return;
+  // Skip expected-flow errors — auth (401/403) and conflict (409, e.g. v2 database not available)
+  if (isExpectedApiError(error)) return;
 
   const severity = error.isNetworkError || error.status >= 500 ? 'error' : 'warning';
 
@@ -59,15 +71,10 @@ export function captureApiError(error: ApiErrorLike, context?: Record<string, st
     scope.setTag('error.type', 'api');
 
     if (context) {
-      // Scrub endpoint URL to path only
+      // Scrub endpoint URL — strip query params; preserve domain for external APIs
       const scrubbed = { ...context };
       if (scrubbed.endpoint) {
-        try {
-          const url = new URL(scrubbed.endpoint, globalThis.location.origin);
-          scrubbed.endpoint = url.pathname;
-        } catch {
-          scrubbed.endpoint = '[scrubbed]';
-        }
+        scrubbed.endpoint = scrubUrl(scrubbed.endpoint);
       }
       scope.setContext('api', scrubbed);
     }
@@ -91,6 +98,9 @@ export function captureError(
   error: Error,
   context?: { category?: string; [key: string]: unknown }
 ): void {
+  // Skip expected-flow errors — 401/403/409 are not bugs
+  if (isExpectedApiError(error)) return;
+
   Sentry.withScope(scope => {
     scope.setLevel('error');
     scope.setTag('error.type', 'logger');
@@ -102,17 +112,62 @@ export function captureError(
         Object.entries(context).filter(([key]) => key !== 'category')
       );
       if (Object.keys(rest).length > 0) {
-        scope.setContext('logger', rest);
+        scope.setContext('logger', scrubContext(rest));
       }
     }
     Sentry.captureException(error);
   });
 }
 
+/** Property names whose values are always redacted (case-insensitive match). */
+const SENSITIVE_KEYS =
+  /^(token|password|secret|apikey|api_key|authorization|cookie|session|sessionid|session_id|ip|ip_address|email|credentials?)$/i;
+
+/** Heuristic: does a string value look like a URL? */
+function looksLikeUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value) || (value.startsWith('/') && value.includes('/', 1));
+}
+
+/**
+ * Scrub a single context entry for PII.
+ * - Sensitive key names are redacted entirely.
+ * - String values that look like URLs are run through scrubUrl().
+ * - Everything else passes through unchanged.
+ */
+function scrubContextValue(key: string, value: unknown): unknown {
+  if (SENSITIVE_KEYS.test(key)) return '[redacted]';
+  if (typeof value === 'string' && looksLikeUrl(value)) return scrubUrl(value);
+  return value;
+}
+
+/** Scrub all entries in a context record for PII before sending to Sentry. */
+function scrubContext(context: Record<string, unknown>): Record<string, unknown> {
+  const scrubbed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(context)) {
+    scrubbed[key] = scrubContextValue(key, value); // eslint-disable-line security/detect-object-injection -- iterating own Record entries
+  }
+  return scrubbed;
+}
+
+/** Scrub a URL for privacy: strip query params and fragments, keep path. */
+function scrubUrl(raw: string): string {
+  try {
+    const url = new URL(raw, globalThis.location.origin);
+    const isLocal = url.origin === globalThis.location.origin;
+    return isLocal ? url.pathname : `${url.origin}${url.pathname}`;
+  } catch {
+    return '[scrubbed]';
+  }
+}
+
 /**
  * Privacy-first event filtering. Scrubs PII before events leave the browser.
+ * Also drops auth errors (401/403) which are expected when users aren't logged in.
  */
-function beforeSend(event: Sentry.ErrorEvent, _hint: Sentry.EventHint): Sentry.ErrorEvent | null {
+function beforeSend(event: Sentry.ErrorEvent, hint: Sentry.EventHint): Sentry.ErrorEvent | null {
+  // Drop expected-flow errors — 401/403/409 can arrive via unhandled rejections or logger.error().
+  if (isExpectedApiError(hint.originalException)) return null;
+
   // 1. Strip user data (Sentry auto-collects IP)
   delete event.user;
 
@@ -122,12 +177,7 @@ function beforeSend(event: Sentry.ErrorEvent, _hint: Sentry.EventHint): Sentry.E
   // 3. Scrub main event request — remove query params, headers, cookies, body
   if (event.request) {
     if (event.request.url) {
-      try {
-        const url = new URL(event.request.url, globalThis.location.origin);
-        event.request.url = url.pathname;
-      } catch {
-        event.request.url = '[scrubbed]';
-      }
+      event.request.url = scrubUrl(event.request.url);
     }
     delete event.request.data;
     delete event.request.cookies;
@@ -139,12 +189,7 @@ function beforeSend(event: Sentry.ErrorEvent, _hint: Sentry.EventHint): Sentry.E
     for (const breadcrumb of event.breadcrumbs) {
       if (breadcrumb.category === 'fetch' || breadcrumb.category === 'xhr') {
         if (breadcrumb.data?.url) {
-          try {
-            const url = new URL(breadcrumb.data.url, globalThis.location.origin);
-            breadcrumb.data.url = url.pathname;
-          } catch {
-            breadcrumb.data.url = '[scrubbed]';
-          }
+          breadcrumb.data.url = scrubUrl(breadcrumb.data.url);
         }
       }
       // 5. Strip request/response bodies from breadcrumb data

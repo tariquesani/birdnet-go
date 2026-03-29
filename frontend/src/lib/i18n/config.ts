@@ -10,6 +10,7 @@ export const LOCALES = {
   es: { name: 'Espanol' },
   fi: { name: 'Suomi' },
   fr: { name: 'Francais' },
+  hu: { name: 'Magyar' },
   it: { name: 'Italiano' },
   lv: { name: 'Latviešu' },
   nl: { name: 'Nederlands' },

@@ -11,6 +11,7 @@
 <script lang="ts">
   import { dndzone } from 'svelte-dnd-action';
   import { Plus, Save, X } from '@lucide/svelte';
+  import { dropdown } from '$lib/utils/transitions';
   import type { DashboardElement, DashboardLayout } from '$lib/stores/settings';
   import type { DashboardElementType } from '$lib/stores/settings';
   import DashboardElementWrapper from './DashboardElementWrapper.svelte';
@@ -23,6 +24,7 @@
   import { getLogger } from '$lib/utils/logger';
   import { t } from '$lib/i18n';
   import type { Snippet } from 'svelte';
+  import { saveGuestLayout } from '$lib/stores/guestDashboardLayout';
 
   const logger = getLogger('dashboard');
 
@@ -32,6 +34,7 @@
   interface Props {
     layout: DashboardLayout;
     editMode: boolean;
+    isGuest?: boolean;
     onLayoutChange: (_layout: DashboardLayout) => void;
     onEditModeChange: (_editing: boolean) => void;
     renderElement: Snippet<
@@ -42,8 +45,15 @@
     >;
   }
 
-  let { layout, editMode, onLayoutChange, onEditModeChange, renderElement, renderSettings }: Props =
-    $props();
+  let {
+    layout,
+    editMode,
+    isGuest = false,
+    onLayoutChange,
+    onEditModeChange,
+    renderElement,
+    renderSettings,
+  }: Props = $props();
 
   let editElements = $state<(DashboardElement & { id: string })[]>([]);
   let isSaving = $state(false);
@@ -102,26 +112,37 @@
     addDropdownOpen = false;
   }
 
-  // Save: persist layout via dashboard API
+  // Build a clean layout object from the current edit state
+  function buildCleanLayout(): DashboardLayout {
+    const cleanElements: DashboardElement[] = editElements.map(el => ({
+      id: el.id,
+      type: el.type,
+      enabled: el.enabled,
+      // Always send explicit width for elements that support it to ensure the
+      // server receives the intended value rather than relying on omission defaults.
+      ...(SUPPORTS_HALF.has(el.type) ? { width: getEffectiveWidth(el) } : {}),
+      ...(el.banner ? { banner: el.banner } : {}),
+      ...(el.video ? { video: el.video } : {}),
+      ...(el.summary ? { summary: el.summary } : {}),
+      ...(el.grid ? { grid: el.grid } : {}),
+    }));
+    return { elements: cleanElements };
+  }
+
+  // Save: persist layout via dashboard API (authenticated) or localStorage (guest)
   async function saveLayout() {
     addDropdownOpen = false;
     isSaving = true;
     try {
-      const cleanElements: DashboardElement[] = editElements.map(el => ({
-        id: el.id,
-        type: el.type,
-        enabled: el.enabled,
-        // Always send explicit width for elements that support it to ensure the
-        // server receives the intended value rather than relying on omission defaults.
-        ...(SUPPORTS_HALF.has(el.type) ? { width: getEffectiveWidth(el) } : {}),
-        ...(el.banner ? { banner: el.banner } : {}),
-        ...(el.video ? { video: el.video } : {}),
-        ...(el.summary ? { summary: el.summary } : {}),
-        ...(el.grid ? { grid: el.grid } : {}),
-      }));
-      const newLayout: DashboardLayout = { elements: cleanElements };
+      const newLayout = buildCleanLayout();
 
-      await api.patch('/api/v2/settings/dashboard', { layout: newLayout });
+      if (isGuest) {
+        // Guest users: persist to localStorage since the settings API requires auth
+        saveGuestLayout(newLayout);
+      } else {
+        await api.patch('/api/v2/settings/dashboard', { layout: newLayout });
+      }
+
       onLayoutChange(newLayout);
       editElements = [];
       onEditModeChange(false);
@@ -227,6 +248,8 @@
       {#if addDropdownOpen && missingTypes.length > 0}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
+          in:dropdown
+          out:dropdown={{ duration: 100 }}
           class="absolute right-0 top-full mt-2 min-w-48 rounded-lg border border-[var(--color-base-200)] bg-[var(--color-base-100)] py-1 shadow-xl"
           onclick={e => e.stopPropagation()}
           onkeydown={e => e.stopPropagation()}

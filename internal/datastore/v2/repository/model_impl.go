@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/datastore/v2/entities"
 	"gorm.io/gorm"
 )
@@ -11,14 +12,17 @@ import (
 // modelRepository implements ModelRepository.
 type modelRepository struct {
 	db          *gorm.DB
+	metrics     *datastore.Metrics
 	useV2Prefix bool
 	isMySQL     bool
 }
 
 // NewModelRepository creates a new ModelRepository.
-func NewModelRepository(db *gorm.DB, useV2Prefix, isMySQL bool) ModelRepository {
+// metrics is optional (nil-safe) and enables retry observability.
+func NewModelRepository(db *gorm.DB, metrics *datastore.Metrics, useV2Prefix, isMySQL bool) ModelRepository {
 	return &modelRepository{
 		db:          db,
+		metrics:     metrics,
 		useV2Prefix: useV2Prefix,
 		isMySQL:     isMySQL,
 	}
@@ -64,7 +68,9 @@ func (r *modelRepository) GetOrCreate(ctx context.Context, name, version, varian
 		ClassifierPath: classifierPath,
 	}
 
-	createErr := r.db.WithContext(ctx).Table(r.tableName()).Create(&model).Error
+	createErr := datastore.RetryOnLock(ctx, "v2_create_model", func() error {
+		return r.db.WithContext(ctx).Table(r.tableName()).Create(&model).Error
+	}, r.metrics)
 	if createErr != nil {
 		// Handle race condition
 		findErr := r.db.WithContext(ctx).Table(r.tableName()).
@@ -134,11 +140,19 @@ func (r *modelRepository) CountLabels(ctx context.Context, modelID uint) (int64,
 
 // Delete removes a model by ID.
 func (r *modelRepository) Delete(ctx context.Context, id uint) error {
-	result := r.db.WithContext(ctx).Table(r.tableName()).Delete(&entities.AIModel{}, id)
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_delete_model", func() error {
+		result := r.db.WithContext(ctx).Table(r.tableName()).Delete(&entities.AIModel{}, id)
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return ErrModelNotFound
 	}
 	return nil

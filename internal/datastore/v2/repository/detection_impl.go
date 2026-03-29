@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/datastore/v2/entities"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"gorm.io/gorm"
@@ -32,6 +33,7 @@ const defaultDBBatchSize = 500
 // detectionRepository implements DetectionRepository.
 type detectionRepository struct {
 	db          *gorm.DB
+	metrics     *datastore.Metrics
 	useV2Prefix bool
 	isMySQL     bool
 }
@@ -39,11 +41,13 @@ type detectionRepository struct {
 // NewDetectionRepository creates a new DetectionRepository.
 // Parameters:
 //   - db: GORM database connection
+//   - metrics: optional DatastoreMetrics for retry observability (nil-safe)
 //   - useV2Prefix: true to use v2_ table prefix (MySQL migration mode)
 //   - isMySQL: true for MySQL dialect (affects date/time SQL expressions)
-func NewDetectionRepository(db *gorm.DB, useV2Prefix, isMySQL bool) DetectionRepository {
+func NewDetectionRepository(db *gorm.DB, metrics *datastore.Metrics, useV2Prefix, isMySQL bool) DetectionRepository {
 	return &detectionRepository{
 		db:          db,
+		metrics:     metrics,
 		useV2Prefix: useV2Prefix,
 		isMySQL:     isMySQL,
 	}
@@ -132,13 +136,17 @@ func (r *detectionRepository) hourFromUnixExpr(column string) string {
 
 // Save persists a new detection.
 func (r *detectionRepository) Save(ctx context.Context, det *entities.Detection) error {
-	return r.db.WithContext(ctx).Table(r.tableName()).Create(det).Error
+	return datastore.RetryOnLock(ctx, "v2_save_detection", func() error {
+		return r.db.WithContext(ctx).Table(r.tableName()).Create(det).Error
+	}, r.metrics)
 }
 
 // SaveWithID persists a detection with a specific ID (for migration).
 // GORM's Create() respects pre-set IDs, so no special handling is needed.
 func (r *detectionRepository) SaveWithID(ctx context.Context, det *entities.Detection) error {
-	return r.db.WithContext(ctx).Table(r.tableName()).Create(det).Error
+	return datastore.RetryOnLock(ctx, "v2_save_detection_with_id", func() error {
+		return r.db.WithContext(ctx).Table(r.tableName()).Create(det).Error
+	}, r.metrics)
 }
 
 // Get retrieves a detection by ID.
@@ -231,18 +239,25 @@ func (r *detectionRepository) GetWithRelations(ctx context.Context, id uint) (*e
 // Update modifies specific fields of a detection.
 // Uses atomic operation to prevent TOCTOU race with lock checks.
 func (r *detectionRepository) Update(ctx context.Context, id uint, updates map[string]any) error {
-	// Atomic update: only update if not locked
-	// Use WHERE NOT EXISTS to combine lock check with update
-	result := r.db.WithContext(ctx).Table(r.tableName()).
-		Where("id = ?", id).
-		Where(fmt.Sprintf("NOT EXISTS (SELECT 1 FROM %s WHERE %s.detection_id = ?)",
-			r.locksTable(), r.locksTable()), id).
-		Updates(updates)
-
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_update_detection", func() error {
+		// Atomic update: only update if not locked
+		// Use WHERE NOT EXISTS to combine lock check with update
+		result := r.db.WithContext(ctx).Table(r.tableName()).
+			Where("id = ?", id).
+			Where(fmt.Sprintf("NOT EXISTS (SELECT 1 FROM %s WHERE %s.detection_id = ?)",
+				r.locksTable(), r.locksTable()), id).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		// Could be: not found OR locked. Check which.
 		exists, err := r.Exists(ctx, id)
 		if err != nil {
@@ -259,17 +274,24 @@ func (r *detectionRepository) Update(ctx context.Context, id uint, updates map[s
 // Delete removes a detection by ID.
 // Uses atomic operation to prevent TOCTOU race with lock checks.
 func (r *detectionRepository) Delete(ctx context.Context, id uint) error {
-	// Atomic delete: only delete if not locked
-	// Use raw SQL with NOT EXISTS to combine lock check with delete
-	result := r.db.WithContext(ctx).Exec(
-		fmt.Sprintf("DELETE FROM %s WHERE id = ? AND NOT EXISTS (SELECT 1 FROM %s WHERE %s.detection_id = ?)",
-			r.tableName(), r.locksTable(), r.locksTable()),
-		id, id)
-
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_delete_detection", func() error {
+		// Atomic delete: only delete if not locked
+		// Use raw SQL with NOT EXISTS to combine lock check with delete
+		result := r.db.WithContext(ctx).Exec(
+			fmt.Sprintf("DELETE FROM %s WHERE id = ? AND NOT EXISTS (SELECT 1 FROM %s WHERE %s.detection_id = ?)",
+				r.tableName(), r.locksTable(), r.locksTable()),
+			id, id)
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		// Could be: not found OR locked. Check which.
 		exists, err := r.Exists(ctx, id)
 		if err != nil {
@@ -292,7 +314,9 @@ func (r *detectionRepository) SaveBatch(ctx context.Context, dets []*entities.De
 	if len(dets) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Table(r.tableName()).CreateInBatches(dets, defaultDBBatchSize).Error
+	return datastore.RetryOnLock(ctx, "v2_save_detection_batch", func() error {
+		return r.db.WithContext(ctx).Table(r.tableName()).CreateInBatches(dets, defaultDBBatchSize).Error
+	}, r.metrics)
 }
 
 // DeleteBatch removes multiple detections by ID.
@@ -300,7 +324,9 @@ func (r *detectionRepository) DeleteBatch(ctx context.Context, ids []uint) error
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Table(r.tableName()).Delete(&entities.Detection{}, ids).Error
+	return datastore.RetryOnLock(ctx, "v2_delete_detection_batch", func() error {
+		return r.db.WithContext(ctx).Table(r.tableName()).Delete(&entities.Detection{}, ids).Error
+	}, r.metrics)
 }
 
 // SaveBatchWithIDs persists multiple detections with specific IDs (for migration).
@@ -309,7 +335,9 @@ func (r *detectionRepository) SaveBatchWithIDs(ctx context.Context, dets []*enti
 	if len(dets) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Table(r.tableName()).CreateInBatches(dets, defaultDBBatchSize).Error
+	return datastore.RetryOnLock(ctx, "v2_save_detection_batch_with_ids", func() error {
+		return r.db.WithContext(ctx).Table(r.tableName()).CreateInBatches(dets, defaultDBBatchSize).Error
+	}, r.metrics)
 }
 
 // GetExistingAndLockedIDs checks which IDs exist and which are locked.
@@ -983,7 +1011,9 @@ func (r *detectionRepository) SavePredictions(ctx context.Context, detectionID u
 		p.DetectionID = detectionID
 	}
 
-	return r.db.WithContext(ctx).Table(r.predictionsTable()).Create(&preds).Error
+	return datastore.RetryOnLock(ctx, "v2_save_predictions", func() error {
+		return r.db.WithContext(ctx).Table(r.predictionsTable()).Create(&preds).Error
+	}, r.metrics)
 }
 
 // SavePredictionsBatch stores predictions for multiple detections efficiently.
@@ -992,9 +1022,11 @@ func (r *detectionRepository) SavePredictionsBatch(ctx context.Context, preds []
 	if len(preds) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Table(r.predictionsTable()).
-		Clauses(clause.OnConflict{DoNothing: true}).
-		CreateInBatches(preds, defaultDBBatchSize).Error
+	return datastore.RetryOnLock(ctx, "v2_save_predictions_batch", func() error {
+		return r.db.WithContext(ctx).Table(r.predictionsTable()).
+			Clauses(clause.OnConflict{DoNothing: true}).
+			CreateInBatches(preds, defaultDBBatchSize).Error
+	}, r.metrics)
 }
 
 // GetPredictions retrieves all predictions for a detection.
@@ -1009,9 +1041,11 @@ func (r *detectionRepository) GetPredictions(ctx context.Context, detectionID ui
 
 // DeletePredictions removes all predictions for a detection.
 func (r *detectionRepository) DeletePredictions(ctx context.Context, detectionID uint) error {
-	return r.db.WithContext(ctx).Table(r.predictionsTable()).
-		Where("detection_id = ?", detectionID).
-		Delete(&entities.DetectionPrediction{}).Error
+	return datastore.RetryOnLock(ctx, "v2_delete_predictions", func() error {
+		return r.db.WithContext(ctx).Table(r.predictionsTable()).
+			Where("detection_id = ?", detectionID).
+			Delete(&entities.DetectionPrediction{}).Error
+	}, r.metrics)
 }
 
 // ============================================================================
@@ -1028,19 +1062,23 @@ func (r *detectionRepository) SaveReview(ctx context.Context, review *entities.D
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		// Create new review
-		return r.db.WithContext(ctx).Table(r.reviewsTable()).Create(review).Error
+		return datastore.RetryOnLock(ctx, "v2_save_review", func() error {
+			return r.db.WithContext(ctx).Table(r.reviewsTable()).Create(review).Error
+		}, r.metrics)
 	}
 	if err != nil {
 		return err
 	}
 
 	// Update existing review
-	return r.db.WithContext(ctx).Table(r.reviewsTable()).
-		Where("detection_id = ?", review.DetectionID).
-		Updates(map[string]any{
-			"verified":   review.Verified,
-			"updated_at": time.Now(),
-		}).Error
+	return datastore.RetryOnLock(ctx, "v2_save_review_update", func() error {
+		return r.db.WithContext(ctx).Table(r.reviewsTable()).
+			Where("detection_id = ?", review.DetectionID).
+			Updates(map[string]any{
+				"verified":   review.Verified,
+				"updated_at": time.Now(),
+			}).Error
+	}, r.metrics)
 }
 
 // GetReview retrieves the review for a detection.
@@ -1057,16 +1095,24 @@ func (r *detectionRepository) GetReview(ctx context.Context, detectionID uint) (
 
 // UpdateReview updates the verification status for a detection.
 func (r *detectionRepository) UpdateReview(ctx context.Context, detectionID uint, verified entities.VerificationStatus) error {
-	result := r.db.WithContext(ctx).Table(r.reviewsTable()).
-		Where("detection_id = ?", detectionID).
-		Updates(map[string]any{
-			"verified":   verified,
-			"updated_at": time.Now(),
-		})
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_update_review", func() error {
+		result := r.db.WithContext(ctx).Table(r.reviewsTable()).
+			Where("detection_id = ?", detectionID).
+			Updates(map[string]any{
+				"verified":   verified,
+				"updated_at": time.Now(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return ErrReviewNotFound
 	}
 	return nil
@@ -1074,13 +1120,21 @@ func (r *detectionRepository) UpdateReview(ctx context.Context, detectionID uint
 
 // DeleteReview removes the review for a detection.
 func (r *detectionRepository) DeleteReview(ctx context.Context, detectionID uint) error {
-	result := r.db.WithContext(ctx).Table(r.reviewsTable()).
-		Where("detection_id = ?", detectionID).
-		Delete(&entities.DetectionReview{})
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_delete_review", func() error {
+		result := r.db.WithContext(ctx).Table(r.reviewsTable()).
+			Where("detection_id = ?", detectionID).
+			Delete(&entities.DetectionReview{})
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return ErrReviewNotFound
 	}
 	return nil
@@ -1091,9 +1145,11 @@ func (r *detectionRepository) SaveReviewsBatch(ctx context.Context, reviews []*e
 	if len(reviews) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Table(r.reviewsTable()).
-		Clauses(clause.OnConflict{DoNothing: true}).
-		CreateInBatches(reviews, defaultDBBatchSize).Error
+	return datastore.RetryOnLock(ctx, "v2_save_reviews_batch", func() error {
+		return r.db.WithContext(ctx).Table(r.reviewsTable()).
+			Clauses(clause.OnConflict{DoNothing: true}).
+			CreateInBatches(reviews, defaultDBBatchSize).Error
+	}, r.metrics)
 }
 
 // GetReviewsByDetectionIDs retrieves reviews for multiple detections.
@@ -1129,7 +1185,9 @@ func (r *detectionRepository) GetReviewsByDetectionIDs(ctx context.Context, dete
 
 // SaveComment adds a comment to a detection.
 func (r *detectionRepository) SaveComment(ctx context.Context, comment *entities.DetectionComment) error {
-	return r.db.WithContext(ctx).Table(r.commentsTable()).Create(comment).Error
+	return datastore.RetryOnLock(ctx, "v2_save_comment", func() error {
+		return r.db.WithContext(ctx).Table(r.commentsTable()).Create(comment).Error
+	}, r.metrics)
 }
 
 // GetComments retrieves all comments for a detection.
@@ -1144,16 +1202,24 @@ func (r *detectionRepository) GetComments(ctx context.Context, detectionID uint)
 
 // UpdateComment modifies a comment's content.
 func (r *detectionRepository) UpdateComment(ctx context.Context, commentID uint, entry string) error {
-	result := r.db.WithContext(ctx).Table(r.commentsTable()).
-		Where("id = ?", commentID).
-		Updates(map[string]any{
-			"entry":      entry,
-			"updated_at": time.Now(),
-		})
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_update_comment", func() error {
+		result := r.db.WithContext(ctx).Table(r.commentsTable()).
+			Where("id = ?", commentID).
+			Updates(map[string]any{
+				"entry":      entry,
+				"updated_at": time.Now(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return ErrCommentNotFound
 	}
 	return nil
@@ -1161,11 +1227,19 @@ func (r *detectionRepository) UpdateComment(ctx context.Context, commentID uint,
 
 // DeleteComment removes a specific comment.
 func (r *detectionRepository) DeleteComment(ctx context.Context, commentID uint) error {
-	result := r.db.WithContext(ctx).Table(r.commentsTable()).Delete(&entities.DetectionComment{}, commentID)
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_delete_comment", func() error {
+		result := r.db.WithContext(ctx).Table(r.commentsTable()).Delete(&entities.DetectionComment{}, commentID)
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return ErrCommentNotFound
 	}
 	return nil
@@ -1176,9 +1250,11 @@ func (r *detectionRepository) SaveCommentsBatch(ctx context.Context, comments []
 	if len(comments) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Table(r.commentsTable()).
-		Clauses(clause.OnConflict{DoNothing: true}).
-		CreateInBatches(comments, defaultDBBatchSize).Error
+	return datastore.RetryOnLock(ctx, "v2_save_comments_batch", func() error {
+		return r.db.WithContext(ctx).Table(r.commentsTable()).
+			Clauses(clause.OnConflict{DoNothing: true}).
+			CreateInBatches(comments, defaultDBBatchSize).Error
+	}, r.metrics)
 }
 
 // GetCommentsByDetectionIDs retrieves comments for multiple detections.
@@ -1231,21 +1307,20 @@ func (r *detectionRepository) Lock(ctx context.Context, detectionID uint) error 
 	}
 
 	lock := entities.DetectionLock{DetectionID: detectionID}
-	return r.db.WithContext(ctx).Table(r.locksTable()).Create(&lock).Error
+	return datastore.RetryOnLock(ctx, "v2_lock_detection", func() error {
+		return r.db.WithContext(ctx).Table(r.locksTable()).Create(&lock).Error
+	}, r.metrics)
 }
 
 // Unlock removes the lock from a detection.
+// This operation is idempotent — unlocking an already-unlocked detection succeeds silently.
+// Uses RetryOnLock for transient SQLite lock contention.
 func (r *detectionRepository) Unlock(ctx context.Context, detectionID uint) error {
-	result := r.db.WithContext(ctx).Table(r.locksTable()).
-		Where("detection_id = ?", detectionID).
-		Delete(&entities.DetectionLock{})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return ErrLockNotFound
-	}
-	return nil
+	return datastore.RetryOnLock(ctx, "v2_unlock_detection", func() error {
+		return r.db.WithContext(ctx).Table(r.locksTable()).
+			Where("detection_id = ?", detectionID).
+			Delete(&entities.DetectionLock{}).Error
+	}, r.metrics)
 }
 
 // IsLocked checks if a detection is locked.
@@ -1274,9 +1349,11 @@ func (r *detectionRepository) SaveLocksBatch(ctx context.Context, locks []*entit
 	if len(locks) == 0 {
 		return nil
 	}
-	return r.db.WithContext(ctx).Table(r.locksTable()).
-		Clauses(clause.OnConflict{DoNothing: true}).
-		CreateInBatches(locks, defaultDBBatchSize).Error
+	return datastore.RetryOnLock(ctx, "v2_save_locks_batch", func() error {
+		return r.db.WithContext(ctx).Table(r.locksTable()).
+			Clauses(clause.OnConflict{DoNothing: true}).
+			CreateInBatches(locks, defaultDBBatchSize).Error
+	}, r.metrics)
 }
 
 // GetLocksByDetectionIDs retrieves lock status for multiple detections.

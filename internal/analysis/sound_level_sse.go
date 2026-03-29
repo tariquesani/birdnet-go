@@ -6,8 +6,8 @@ import (
 	"time"
 
 	apiv2 "github.com/tphakala/birdnet-go/internal/api/v2"
+	"github.com/tphakala/birdnet-go/internal/audiocore/soundlevel"
 	"github.com/tphakala/birdnet-go/internal/logger"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observability/metrics"
 )
 
@@ -21,7 +21,7 @@ func getSoundLevelMetrics(apiController *apiv2.Controller) *metrics.SoundLevelMe
 }
 
 // startSoundLevelSSEPublisher starts a goroutine to consume sound level data and publish via SSE
-func startSoundLevelSSEPublisher(wg *sync.WaitGroup, ctx context.Context, apiController *apiv2.Controller, soundLevelChan <-chan myaudio.SoundLevelData) {
+func startSoundLevelSSEPublisher(wg *sync.WaitGroup, ctx context.Context, apiController *apiv2.Controller, soundLevelChan <-chan soundlevel.SoundLevelData) {
 	if apiController == nil {
 		GetLogger().Warn("SSE API controller not available, sound level SSE publishing disabled")
 		return
@@ -35,7 +35,10 @@ func startSoundLevelSSEPublisher(wg *sync.WaitGroup, ctx context.Context, apiCon
 			case <-ctx.Done():
 				GetLogger().Info("Stopping sound level SSE publisher")
 				return
-			case soundData := <-soundLevelChan:
+			case soundData, ok := <-soundLevelChan:
+				if !ok {
+					return // channel closed
+				}
 				// Sanitize sound level data before SSE publishing
 				sanitizedData := sanitizeSoundLevelData(soundData)
 				// Publish sound level data via SSE

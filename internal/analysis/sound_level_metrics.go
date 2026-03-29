@@ -2,12 +2,11 @@ package analysis
 
 import (
 	"math"
-	"sync"
 	"time"
 
+	"github.com/tphakala/birdnet-go/internal/audiocore/soundlevel"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/logger"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observability"
 )
 
@@ -17,32 +16,8 @@ func getMetricsLogger() logger.Logger {
 	return logger.Global().Module("analysis").Module("soundlevel").Module("metrics")
 }
 
-// startSoundLevelMetricsPublisher starts a goroutine to consume sound level data and update Prometheus metrics
-func startSoundLevelMetricsPublisher(wg *sync.WaitGroup, quitChan chan struct{}, metrics *observability.Metrics) {
-	lg := getMetricsLogger()
-	if metrics == nil || metrics.SoundLevel == nil {
-		lg.Warn("sound level metrics not available, metrics publishing disabled")
-		return
-	}
-
-	wg.Go(func() {
-		lg.Info("started sound level metrics publisher")
-
-		for {
-			select {
-			case <-quitChan:
-				lg.Info("stopping sound level metrics publisher")
-				return
-			case soundData := <-soundLevelChan:
-				// Update metrics for each octave band
-				updateSoundLevelMetrics(soundData, metrics)
-			}
-		}
-	})
-}
-
 // updateSoundLevelMetrics updates Prometheus metrics with sound level data
-func updateSoundLevelMetrics(soundData myaudio.SoundLevelData, metrics *observability.Metrics) {
+func updateSoundLevelMetrics(soundData soundlevel.SoundLevelData, metrics *observability.Metrics) {
 	if metrics.SoundLevel == nil {
 		return
 	}

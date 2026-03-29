@@ -12,6 +12,7 @@
     "refresh": "Refresh",
     "delete": "Delete",
     "edit": "Edit",
+    "enabled": "Enabled",
     "search": "Search",
     "filter": "Filter",
     "sort": "Sort",
@@ -390,9 +391,12 @@
         "reconfiguringTelemetry": "Updating telemetry settings...",
         "reconfiguringPushNotifications": "Reconfiguring push notification providers...",
         "reconfiguringSpeciesTracking": "Updating species tracking...",
+        "recalculatingThresholds": "Recalculating dynamic thresholds for new base value",
+        "reconfiguringDynamicThresholds": "Reconfiguring dynamic thresholds...",
         "webserverRestartRequired": "Web server settings changed. Restart required.",
         "reconfiguringSoundLevel": "Updating sound level monitoring...",
         "audioDeviceRestartRequired": "Audio device changed. Restart required.",
+        "rebuildingExtendedCapture": "Rebuilding extended capture filter...",
         "extendedCaptureRestartRequired": "Extended capture settings changed. Restart required.",
         "equalizerUpdateFailed": "Failed to update audio equalizer settings",
         "equalizerUpdated": "Audio equalizer settings updated",
@@ -510,6 +514,15 @@
       "unverified": "Unverified",
       "locked": "Locked",
       "unlocked": "Unlocked"
+    },
+    "review": {
+      "review": "Review",
+      "reviewDetection": "Review detection for {species}",
+      "markCorrect": "Mark as correct",
+      "markFalsePositive": "Mark as false positive",
+      "markedCorrect": "Detection marked as correct",
+      "markedFalsePositive": "Detection marked as false positive",
+      "failed": "Failed to update verification status"
     },
     "detailsPanel": {
       "audioPlayer": "Audio Player",
@@ -921,10 +934,12 @@
       "frequencyRange": "Frequency Range",
       "colorMap": "Color Map",
       "gain": "Gain",
-      "mute": "Mute",
-      "unmute": "Unmute",
+      "gainTooltip": "Spectrogram visualization gain",
+      "mute": "Mute audio output",
+      "unmute": "Unmute audio output",
       "frequencyRangeMin": "Minimum frequency",
-      "frequencyRangeMax": "Maximum frequency"
+      "frequencyRangeMax": "Maximum frequency",
+      "audioMonitor": "Audio Monitor"
     },
     "error": {
       "unsupported": "Your browser does not support audio analysis",
@@ -2785,6 +2800,42 @@
         "warning": "No Audio Sources Configured",
         "description": "BirdNET-Go needs an audio input to detect birds. Please configure at least one source in the Sound Card or Streams tab."
       },
+      "soundCards": {
+        "summary": "{count} sound card source(s)",
+        "addSource": "Add Sound Card",
+        "nameLabel": "Source Name",
+        "namePlaceholder": "e.g., Front Yard Microphone",
+        "nameHelp": "A descriptive name for this audio source",
+        "deviceLabel": "Audio Device",
+        "devicePlaceholder": "Select an audio device",
+        "gainLabel": "Gain (dB)",
+        "gainHelp": "Audio input gain adjustment (-40 to +40 dB)",
+        "modelLabel": "Detection Model",
+        "modelHelp": "BirdNET model to use for this source",
+        "deleteConfirm": "Remove this sound card source?",
+        "emptyState": {
+          "title": "No Sound Card Sources Configured",
+          "description": "Add a sound card source to start capturing audio for bird detection.",
+          "hintsTitle": "Getting Started",
+          "hints": {
+            "device": "Select from available audio input devices on your system",
+            "multiple": "You can configure multiple sound cards for different locations",
+            "model": "Each source can use a different detection model (BirdNET, Perch, Bat)"
+          }
+        },
+        "models": {
+          "birdnetDefault": "BirdNET (Default)",
+          "birdnet": "BirdNET",
+          "perchV2": "Google Perch v2",
+          "bat": "Bat Detection"
+        },
+        "errors": {
+          "nameRequired": "Source name is required",
+          "deviceRequired": "Audio device is required",
+          "duplicateName": "A source with this name already exists",
+          "duplicateDevice": "This device is already configured"
+        }
+      },
       "audioCapture": {
         "title": "Sound Card Configuration",
         "description": "Select the audio input device for bird sound detection. Changes require application restart.",
@@ -3951,6 +4002,10 @@
     "labels": {
       "showPassword": "Show password",
       "hidePassword": "Hide password",
+      "secretSet": "Set",
+      "changeSecret": "Change",
+      "cancelChange": "Cancel",
+      "enterNewSecret": "Enter new value",
       "copyToClipboard": "Copy to clipboard",
       "clearSelection": "Clear selection",
       "selectOption": "Select an option"

@@ -480,7 +480,6 @@
       case 'ntfy': {
         if (!serviceFormData.ntfyTopic) return '';
         const server = serviceFormData.ntfyServer?.trim() || 'ntfy.sh';
-        const isPublic = server === 'ntfy.sh';
 
         const user = serviceFormData.ntfyUsername?.trim() || '';
         const pass = serviceFormData.ntfyPassword?.trim() || '';
@@ -490,10 +489,9 @@
             : `${encodeURIComponent(user)}@`
           : '';
 
-        if (isPublic) {
-          return `ntfy://${serviceFormData.ntfyTopic}`;
-        }
-
+        // Always include the server hostname in the URL.
+        // ntfy://topic (without host) is ambiguous and shoutrrr interprets
+        // the topic as the hostname, causing delivery failures.
         const normalizedServer = normalizeNtfyHost(server);
         const schemeParam = serviceFormData.ntfyProtocol === 'http' ? '?scheme=http' : '';
         return `ntfy://${auth}${normalizedServer}/${serviceFormData.ntfyTopic}${schemeParam}`;
@@ -835,6 +833,10 @@
     editingProviderIndex = null;
   }
 
+  // Track an in-flight checkNtfyServer() promise so the save button stays
+  // disabled during the debounce window, preventing a race condition.
+  let ntfyCheckPromise: Promise<void> | undefined = $state();
+
   function saveProvider() {
     if (!isServiceFormValid) return;
 
@@ -1008,6 +1010,31 @@
         serviceFormData.ntfyCheckStatus = 'unreachable';
       }
     }
+  }
+
+  // Auto-detect ntfy server protocol after a brief debounce when the server changes.
+  // The promise is created immediately so saveProvider() can await it even if the
+  // debounce timer has not yet fired.
+  let ntfyAutoCheckTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleNtfyAutoCheck() {
+    clearTimeout(ntfyAutoCheckTimer);
+    const server = serviceFormData.ntfyServer?.trim() || '';
+    if (!server || server === 'ntfy.sh') {
+      ntfyCheckPromise = undefined;
+      return;
+    }
+    const promise = new Promise<void>(resolve => {
+      ntfyAutoCheckTimer = setTimeout(() => {
+        checkNtfyServer().finally(resolve);
+      }, 800);
+    });
+    ntfyCheckPromise = promise;
+    promise.finally(() => {
+      // Only clear if no newer check has replaced us
+      if (ntfyCheckPromise === promise) {
+        ntfyCheckPromise = undefined;
+      }
+    });
   }
 
   function toggleFilterType(type: string) {
@@ -1547,6 +1574,7 @@
                         serviceFormData.ntfyCheckHost = '';
                         serviceFormData.ntfyUsername = '';
                         serviceFormData.ntfyPassword = '';
+                        scheduleNtfyAutoCheck();
                       }}
                     />
                     <p class="text-xs text-[var(--color-base-content)]/60 -mt-2">
@@ -1939,7 +1967,9 @@
                     <button
                       onclick={saveProvider}
                       class="inline-flex items-center justify-center h-8 px-3 text-sm font-medium rounded-lg bg-[var(--color-primary)] text-[var(--color-primary-content)] hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-primary)] focus-visible:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      disabled={!isServiceFormValid}
+                      disabled={!isServiceFormValid ||
+                        (selectedService === 'ntfy' &&
+                          (serviceFormData.ntfyCheckStatus === 'checking' || !!ntfyCheckPromise))}
                     >
                       {t('settings.notifications.push.form.saveButton')}
                     </button>

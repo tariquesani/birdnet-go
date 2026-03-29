@@ -19,11 +19,11 @@ import (
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/alerting"
+	"github.com/tphakala/birdnet-go/internal/audiocore/ffmpeg"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/logger"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 )
 
 // GetLogger returns the birdweather package logger
@@ -223,7 +223,8 @@ func handleNetworkError(err error, url string, timeout time.Duration, operation 
 		var dnsErr *net.DNSError
 		if errors.As(urlErr.Err, &dnsErr) {
 			descriptiveErr := fmt.Errorf("BirdWeather %s DNS resolution failed: %w", operation, err)
-			log.Error("DNS resolution failed",
+			// DNS failures are transient infrastructure issues, not code bugs
+			log.Warn("DNS resolution failed",
 				logger.String("operation", operation),
 				logger.String("url", url),
 				logger.Error(err))
@@ -237,7 +238,8 @@ func handleNetworkError(err error, url string, timeout time.Duration, operation 
 		}
 	}
 	descriptiveErr := fmt.Errorf("BirdWeather %s network error: %w", operation, err)
-	log.Error("Network error occurred",
+	// Generic network errors are transient infrastructure issues
+	log.Warn("Network error occurred",
 		logger.String("operation", operation),
 		logger.Error(err))
 	return errors.New(descriptiveErr).
@@ -420,7 +422,7 @@ func encodeFlacUsingFFmpeg(ctx context.Context, pcmData []byte, ffmpegPath strin
 	// --- Pass 1: Analyze Loudness ---
 	// Use the provided context for the analysis
 	log.Debug("Performing loudness analysis (Pass 1)")
-	loudnessStats, err := myaudio.AnalyzeAudioLoudnessWithContext(ctx, pcmData, ffmpegPath)
+	loudnessStats, err := ffmpeg.AnalyzePCMLoudness(ctx, pcmData, ffmpegPath, conf.SampleRate, conf.BitDepth)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -441,7 +443,7 @@ func encodeFlacUsingFFmpeg(ctx context.Context, pcmData []byte, ffmpegPath strin
 
 		// Use the provided context for the fallback export operation
 		log.Debug("Starting fallback FLAC export with fixed gain", logger.Float64("gain_db", gainValue))
-		buffer, err := myaudio.ExportAudioWithCustomFFmpegArgsContext(ctx, pcmData, ffmpegPath, customArgs)
+		buffer, err := ffmpeg.ExportAudioToBuffer(ctx, pcmData, ffmpegPath, conf.SampleRate, conf.NumChannels, conf.BitDepth, customArgs)
 		if err != nil {
 			log.Error("Fallback FLAC export with fixed gain failed",
 				logger.Float64("gain_db", gainValue),
@@ -497,7 +499,7 @@ func encodeFlacUsingFFmpeg(ctx context.Context, pcmData []byte, ffmpegPath strin
 	}
 
 	// Use the provided context for the final encoding operation
-	buffer, err := myaudio.ExportAudioWithCustomFFmpegArgsContext(ctx, pcmData, ffmpegPath, customArgs)
+	buffer, err := ffmpeg.ExportAudioToBuffer(ctx, pcmData, ffmpegPath, conf.SampleRate, conf.NumChannels, conf.BitDepth, customArgs)
 	if err != nil {
 		log.Error("FFmpeg FLAC encoding with gain adjustment failed",
 			logger.Float64("gain_db", gainNeeded),
@@ -824,16 +826,25 @@ func (b *BwClient) Publish(note *datastore.Note, pcmData []byte) (err error) {
 	log.Debug("Calling UploadSoundscape", logger.String("timestamp", timestamp))
 	soundscapeID, err := b.UploadSoundscape(timestamp, pcmData)
 	if err != nil {
-		log.Error("Publish failed: Error during soundscape upload",
-			logger.String("timestamp", timestamp),
-			logger.Error(err))
-		alerting.TryPublish(&alerting.AlertEvent{
-			ObjectType: alerting.ObjectTypeIntegration,
-			EventName:  alerting.EventBirdWeatherFailed,
-			Properties: map[string]any{
-				alerting.PropertyError: err.Error(),
-			},
-		})
+		// Transient network errors (DNS, timeout, connection issues) are expected
+		// external failures, not code bugs. Log at warn level and skip alerting
+		// to avoid Sentry noise and unnecessary user notifications.
+		if errors.IsTransientNetworkError(err) {
+			log.Warn("BirdWeather soundscape upload failed due to transient network issue",
+				logger.String("timestamp", timestamp),
+				logger.Error(err))
+		} else {
+			log.Error("Publish failed: Error during soundscape upload",
+				logger.String("timestamp", timestamp),
+				logger.Error(err))
+			alerting.TryPublish(&alerting.AlertEvent{
+				ObjectType: alerting.ObjectTypeIntegration,
+				EventName:  alerting.EventBirdWeatherFailed,
+				Properties: map[string]any{
+					alerting.PropertyError: err.Error(),
+				},
+			})
+		}
 		return fmt.Errorf("failed to upload soundscape to Birdweather: %w", err)
 	}
 	log.Debug("UploadSoundscape completed",
@@ -847,15 +858,26 @@ func (b *BwClient) Publish(note *datastore.Note, pcmData []byte) (err error) {
 		logger.Any("note", note))
 	err = b.PostDetection(soundscapeID, timestamp, note.CommonName, note.ScientificName, note.Confidence)
 	if err != nil {
-		// Check if error is CategoryNotFound (e.g., invalid species on Birdweather)
-		// Log at debug level for expected validation failures
-		if errors.IsNotFound(err) {
+		switch {
+		case errors.IsNotFound(err):
+			// CategoryNotFound (e.g., invalid species on Birdweather)
+			// Expected — not all BirdNET species exist in BirdWeather. Skip without error.
 			log.Debug("Publish skipped: species not recognized by Birdweather",
 				logger.String("soundscape_id", soundscapeID),
 				logger.String("common_name", note.CommonName),
 				logger.String("scientific_name", note.ScientificName),
 				logger.Error(err))
-		} else {
+			return nil
+		case errors.IsTransientNetworkError(err):
+			// Transient network errors during detection post are expected
+			// external failures. Log at warn level and skip alerting.
+			log.Warn("BirdWeather detection post failed due to transient network issue",
+				logger.String("soundscape_id", soundscapeID),
+				logger.String("timestamp", timestamp),
+				logger.String("common_name", note.CommonName),
+				logger.String("scientific_name", note.ScientificName),
+				logger.Error(err))
+		default:
 			log.Error("Publish failed: Error during detection post",
 				logger.String("soundscape_id", soundscapeID),
 				logger.String("timestamp", timestamp),

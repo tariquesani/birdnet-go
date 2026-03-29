@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/datastore/v2/entities"
 	"gorm.io/gorm"
 )
@@ -12,6 +13,7 @@ import (
 // audioSourceRepository implements AudioSourceRepository.
 type audioSourceRepository struct {
 	db          *gorm.DB
+	metrics     *datastore.Metrics
 	useV2Prefix bool
 	isMySQL     bool // For API consistency; currently unused here (used by detection_impl.go for dialect-specific SQL)
 }
@@ -19,11 +21,13 @@ type audioSourceRepository struct {
 // NewAudioSourceRepository creates a new AudioSourceRepository.
 // Parameters:
 //   - db: GORM database connection
+//   - metrics: optional DatastoreMetrics for retry observability (nil-safe)
 //   - useV2Prefix: true to use v2_ table prefix (MySQL migration mode)
 //   - isMySQL: true for MySQL dialect (affects date/time SQL expressions)
-func NewAudioSourceRepository(db *gorm.DB, useV2Prefix, isMySQL bool) AudioSourceRepository {
+func NewAudioSourceRepository(db *gorm.DB, metrics *datastore.Metrics, useV2Prefix, isMySQL bool) AudioSourceRepository {
 	return &audioSourceRepository{
 		db:          db,
+		metrics:     metrics,
 		useV2Prefix: useV2Prefix,
 		isMySQL:     isMySQL,
 	}
@@ -65,7 +69,9 @@ func (r *audioSourceRepository) GetOrCreate(ctx context.Context, sourceURI, node
 		SourceType:  sourceType,
 	}
 
-	createErr := r.db.WithContext(ctx).Table(r.tableName()).Create(&source).Error
+	createErr := datastore.RetryOnLock(ctx, "v2_create_audio_source", func() error {
+		return r.db.WithContext(ctx).Table(r.tableName()).Create(&source).Error
+	}, r.metrics)
 	if createErr != nil {
 		// Handle race condition - another goroutine may have created it.
 		// Try to fetch the existing record; if that also fails, return the original create error.
@@ -183,11 +189,19 @@ func (r *audioSourceRepository) Count(ctx context.Context) (int64, error) {
 
 // Delete removes an audio source by ID.
 func (r *audioSourceRepository) Delete(ctx context.Context, id uint) error {
-	result := r.db.WithContext(ctx).Table(r.tableName()).Delete(&entities.AudioSource{}, id)
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_delete_audio_source", func() error {
+		result := r.db.WithContext(ctx).Table(r.tableName()).Delete(&entities.AudioSource{}, id)
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return ErrAudioSourceNotFound
 	}
 	return nil
@@ -195,13 +209,21 @@ func (r *audioSourceRepository) Delete(ctx context.Context, id uint) error {
 
 // Update modifies an audio source's fields.
 func (r *audioSourceRepository) Update(ctx context.Context, id uint, updates map[string]any) error {
-	result := r.db.WithContext(ctx).Table(r.tableName()).
-		Where("id = ?", id).
-		Updates(updates)
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_update_audio_source", func() error {
+		result := r.db.WithContext(ctx).Table(r.tableName()).
+			Where("id = ?", id).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return ErrAudioSourceNotFound
 	}
 	return nil

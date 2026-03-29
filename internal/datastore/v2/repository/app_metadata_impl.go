@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/datastore/v2/entities"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"gorm.io/gorm"
@@ -13,6 +14,7 @@ import (
 // appMetadataRepository implements AppMetadataRepository.
 type appMetadataRepository struct {
 	db          *gorm.DB
+	metrics     *datastore.Metrics
 	useV2Prefix bool
 	isMySQL     bool
 }
@@ -20,11 +22,13 @@ type appMetadataRepository struct {
 // NewAppMetadataRepository creates a new AppMetadataRepository.
 // Parameters:
 //   - db: GORM database connection
+//   - metrics: optional DatastoreMetrics for retry observability (nil-safe)
 //   - useV2Prefix: true to use v2_ table prefix (MySQL migration mode)
 //   - isMySQL: true for MySQL dialect (affects date/time SQL expressions)
-func NewAppMetadataRepository(db *gorm.DB, useV2Prefix, isMySQL bool) AppMetadataRepository {
+func NewAppMetadataRepository(db *gorm.DB, metrics *datastore.Metrics, useV2Prefix, isMySQL bool) AppMetadataRepository {
 	return &appMetadataRepository{
 		db:          db,
+		metrics:     metrics,
 		useV2Prefix: useV2Prefix,
 		isMySQL:     isMySQL,
 	}
@@ -60,13 +64,15 @@ func (r *appMetadataRepository) Set(ctx context.Context, key, value string) erro
 		Key:   key,
 		Value: value,
 	}
-	if err := r.db.WithContext(ctx).Table(r.tableName()).
-		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"value"}),
-		}).
-		Create(&meta).Error; err != nil {
-		return fmt.Errorf("set app metadata key %q: %w", key, err)
-	}
-	return nil
+	return datastore.RetryOnLock(ctx, "v2_set_app_metadata", func() error {
+		if err := r.db.WithContext(ctx).Table(r.tableName()).
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "key"}},
+				DoUpdates: clause.AssignmentColumns([]string{"value"}),
+			}).
+			Create(&meta).Error; err != nil {
+			return fmt.Errorf("set app metadata key %q: %w", key, err)
+		}
+		return nil
+	}, r.metrics)
 }

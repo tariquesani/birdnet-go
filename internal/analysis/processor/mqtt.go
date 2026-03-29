@@ -5,12 +5,12 @@ import (
 	"context"
 	"time"
 
+	"github.com/tphakala/birdnet-go/internal/audiocore"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/logger"
 	"github.com/tphakala/birdnet-go/internal/mqtt"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 )
 
 const (
@@ -77,6 +77,11 @@ func (p *Processor) initializeMQTT(settings *conf.Settings) {
 	mqttClient, err := mqtt.NewClient(settings, p.Metrics)
 	if err != nil {
 		log.Error("failed to create MQTT client", logger.Error(err))
+		_ = errors.New(err).
+			Component("analysis.processor").
+			Category(errors.CategoryMQTTConnection).
+			Context("operation", "mqtt_client_create").
+			Build()
 		return
 	}
 
@@ -92,6 +97,11 @@ func (p *Processor) initializeMQTT(settings *conf.Settings) {
 	// Attempt to connect to the MQTT broker
 	if err := mqttClient.Connect(ctx); err != nil {
 		log.Error("failed to connect to MQTT broker", logger.Error(err))
+		_ = errors.New(err).
+			Component("analysis.processor").
+			Category(errors.CategoryMQTTConnection).
+			Context("operation", "mqtt_connect").
+			Build()
 		return
 	}
 
@@ -214,10 +224,21 @@ func (p *Processor) TriggerHomeAssistantDiscovery(ctx context.Context) error {
 
 // getAudioSourcesForDiscovery retrieves audio sources from the registry for HA discovery.
 func (p *Processor) getAudioSourcesForDiscovery() []datastore.AudioSource {
-	registry := myaudio.GetRegistry()
-	registrySources := registry.ListSources()
+	p.registryMu.RLock()
+	registry := p.registry
+	p.registryMu.RUnlock()
 
-	// Convert myaudio.AudioSource to datastore.AudioSource
+	if registry == nil {
+		// Fallback when registry is not yet injected
+		return []datastore.AudioSource{{
+			ID:          "default",
+			DisplayName: "Default",
+		}}
+	}
+
+	registrySources := registry.List()
+
+	// Convert audiocore.AudioSource to datastore.AudioSource
 	sources := make([]datastore.AudioSource, 0, len(registrySources))
 	for _, src := range registrySources {
 		sources = append(sources, datastore.AudioSource{
@@ -236,4 +257,18 @@ func (p *Processor) getAudioSourcesForDiscovery() []datastore.AudioSource {
 	}
 
 	return sources
+}
+
+// SetRegistry sets the source registry for audio source lookups.
+func (p *Processor) SetRegistry(r *audiocore.SourceRegistry) {
+	p.registryMu.Lock()
+	defer p.registryMu.Unlock()
+	p.registry = r
+}
+
+// Registry returns the source registry, or nil if not set.
+func (p *Processor) Registry() *audiocore.SourceRegistry {
+	p.registryMu.RLock()
+	defer p.registryMu.RUnlock()
+	return p.registry
 }

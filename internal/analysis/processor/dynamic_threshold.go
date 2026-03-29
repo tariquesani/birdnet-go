@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/tphakala/birdnet-go/internal/datastore"
+	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/logger"
 )
 
@@ -137,6 +138,11 @@ func (p *Processor) recordThresholdEvent(speciesName, scientificName string, pre
 		if err := p.Ds.SaveThresholdEvent(event); err != nil {
 			log := GetLogger()
 			log.Error("Failed to save threshold event", logger.String("species", speciesName), logger.Error(err))
+			_ = errors.New(err).
+				Component("analysis.processor").
+				Category(errors.CategoryDatabase).
+				Context("operation", "save_threshold_event").
+				Build()
 		}
 	}()
 }
@@ -207,15 +213,13 @@ func (p *Processor) LearnFromApprovedDetection(speciesLowercase, scientificName 
 	switch dt.HighConfCount {
 	case 1:
 		dt.Level = 1
-		dt.CurrentValue = float64(baseThreshold * thresholdLevel1Multiplier)
 	case 2:
 		dt.Level = 2
-		dt.CurrentValue = float64(baseThreshold * thresholdLevel2Multiplier)
 	default:
 		// Level 3 is the maximum reduction; any count >= 3 stays at this level
 		dt.Level = 3
-		dt.CurrentValue = float64(baseThreshold * thresholdLevel3Multiplier)
 	}
+	dt.CurrentValue = float64(baseThreshold) * levelMultiplier(dt.Level)
 
 	// Apply minimum threshold clamp
 	if dt.CurrentValue < p.Settings.Realtime.DynamicThreshold.Min {
@@ -306,19 +310,28 @@ func (p *Processor) cleanUpDynamicThresholds() {
 // This removes both the in-memory threshold and the database records.
 // The error return is always nil as database errors are logged internally
 // and the operation is best-effort for database cleanup.
+//
+// The mutex is held for the entire operation (memory clear + DB delete) to
+// prevent a race where a new detection inserts data between the memory clear
+// and the DB delete, causing the DB delete to wipe the newly-inserted record.
 func (p *Processor) ResetDynamicThreshold(speciesName string) error {
 	log := GetLogger()
 	// Normalize to lowercase to match the casing used by addSpeciesToDynamicThresholds
 	speciesName = strings.ToLower(speciesName)
 
-	// Lock the mutex to ensure thread-safe access to the DynamicThresholds map
+	// Lock the mutex for the entire operation to prevent races between
+	// memory clear and DB delete. See drainPendingResets for the pattern.
 	p.thresholdsMutex.Lock()
 
-	// Remove from in-memory map
+	// Remove from in-memory map and mark as pending reset so the periodic
+	// persistence goroutine won't re-insert a stale snapshot into the database.
 	delete(p.DynamicThresholds, speciesName)
-	p.thresholdsMutex.Unlock()
+	if p.pendingResets != nil {
+		p.pendingResets[speciesName] = struct{}{}
+	}
 
-	// Delete from database
+	// Delete from database while still holding the lock to prevent a concurrent
+	// detection from inserting new data that this delete would then wipe.
 	if p.Ds != nil {
 		// Delete the threshold record
 		if err := p.Ds.DeleteDynamicThreshold(speciesName); err != nil {
@@ -331,6 +344,7 @@ func (p *Processor) ResetDynamicThreshold(speciesName string) error {
 			log.Warn("failed to delete threshold events from database", logger.String("species", speciesName), logger.Error(err))
 		}
 	}
+	p.thresholdsMutex.Unlock()
 
 	log.Info("reset dynamic threshold", logger.String("species", speciesName))
 	return nil
@@ -340,19 +354,30 @@ func (p *Processor) ResetDynamicThreshold(speciesName string) error {
 // Returns the count of reset thresholds. The error return is always nil as database
 // errors are logged internally and the operation is best-effort for database cleanup;
 // in-memory reset is always successful.
+//
+// The mutex is held for the entire operation (memory clear + DB delete) to
+// prevent a race where a new detection inserts data between the memory clear
+// and the DB delete, causing the DB delete to wipe the newly-inserted record.
 func (p *Processor) ResetAllDynamicThresholds() (int64, error) {
 	log := GetLogger()
-	// Lock the mutex to ensure thread-safe access to the DynamicThresholds map
+	// Lock the mutex for the entire operation to prevent races between
+	// memory clear and DB delete. See drainPendingResets for the pattern.
 	p.thresholdsMutex.Lock()
 
 	// Count in-memory thresholds
 	count := int64(len(p.DynamicThresholds))
 
-	// Clear all in-memory thresholds (no need to record reset events since history is cleared)
+	// Clear all in-memory thresholds and set pendingResetAll so the periodic
+	// persistence goroutine won't re-insert a stale snapshot into the database.
+	// Also clear individual pending resets since pendingResetAll supersedes them.
 	p.DynamicThresholds = make(map[string]*DynamicThreshold)
-	p.thresholdsMutex.Unlock()
+	p.pendingResetAll = true
+	if p.pendingResets != nil {
+		p.pendingResets = make(map[string]struct{})
+	}
 
-	// Delete all from database
+	// Delete all from database while still holding the lock to prevent a
+	// concurrent detection from inserting new data that this delete would wipe.
 	if p.Ds != nil {
 		dbCount, err := p.Ds.DeleteAllDynamicThresholds()
 		if err != nil {
@@ -370,6 +395,7 @@ func (p *Processor) ResetAllDynamicThresholds() (int64, error) {
 			log.Warn("failed to delete all threshold events from database", logger.Error(err))
 		}
 	}
+	p.thresholdsMutex.Unlock()
 
 	log.Info("reset all dynamic thresholds", logger.Int64("count", count))
 	return count, nil
@@ -408,4 +434,66 @@ type DynamicThresholdData struct {
 	HighConfCount  int       `json:"highConfCount"`
 	ExpiresAt      time.Time `json:"expiresAt"`
 	IsActive       bool      `json:"isActive"`
+}
+
+// levelMultiplier returns the threshold multiplier for a given level.
+// This centralizes the level-to-multiplier mapping used by both LearnFromApprovedDetection
+// and RecalculateDynamicThresholds to avoid duplication.
+func levelMultiplier(level int) float64 {
+	switch level {
+	case 1:
+		return thresholdLevel1Multiplier
+	case 2:
+		return thresholdLevel2Multiplier
+	case 3:
+		return thresholdLevel3Multiplier
+	default:
+		return 1.0 // Level 0 = no reduction
+	}
+}
+
+// RecalculateDynamicThresholds recomputes all CurrentValue entries based on the current
+// BirdNET.Threshold. This must be called when the global base threshold changes so that
+// stored absolute values remain consistent with each species' level/tier.
+// Species with custom per-species thresholds are not present in the dynamic thresholds
+// map (they are filtered out in LearnFromApprovedDetection), so no special handling is needed.
+func (p *Processor) RecalculateDynamicThresholds() {
+	log := GetLogger()
+	newBase := float64(p.Settings.BirdNET.Threshold)
+	minThreshold := p.Settings.Realtime.DynamicThreshold.Min
+
+	p.thresholdsMutex.Lock()
+	defer p.thresholdsMutex.Unlock()
+
+	recalculated := 0
+	for species, dt := range p.DynamicThresholds {
+		oldValue := dt.CurrentValue
+		newValue := newBase * levelMultiplier(dt.Level)
+
+		// Apply minimum threshold clamp
+		if newValue < minThreshold {
+			newValue = minThreshold
+		}
+
+		if oldValue != newValue {
+			dt.CurrentValue = newValue
+			recalculated++
+
+			if p.Settings.Realtime.DynamicThreshold.Debug {
+				log.Debug("Recalculated dynamic threshold for new base",
+					logger.String("species", species),
+					logger.Int("level", dt.Level),
+					logger.Float64("old_value", oldValue),
+					logger.Float64("new_value", newValue),
+					logger.Float64("new_base", newBase))
+			}
+		}
+	}
+
+	if recalculated > 0 {
+		log.Info("Recalculated dynamic thresholds for new base threshold",
+			logger.Int("recalculated", recalculated),
+			logger.Int("total", len(p.DynamicThresholds)),
+			logger.Float64("new_base", newBase))
+	}
 }

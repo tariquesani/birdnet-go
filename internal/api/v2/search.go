@@ -129,9 +129,9 @@ func (c *Controller) buildSearchFilters(req *SearchRequest, ctxTimeout context.C
 		DateEnd:           req.DateEnd,
 		ConfidenceMin:     req.ConfidenceMin,
 		ConfidenceMax:     req.ConfidenceMax,
-		VerifiedOnly:      req.VerifiedStatus == "verified",
-		UnverifiedOnly:    req.VerifiedStatus == "unverified",
-		FalsePositiveOnly: req.VerifiedStatus == "false_positive",
+		VerifiedOnly:      req.VerifiedStatus == VerificationStatusCorrect,
+		UnverifiedOnly:    req.VerifiedStatus == VerificationStatusUnverified,
+		FalsePositiveOnly: req.VerifiedStatus == VerificationStatusFalsePositive,
 		LockedOnly:        req.LockedStatus == "locked",
 		UnlockedOnly:      req.LockedStatus == "unlocked",
 		Device:            req.DeviceFilter,
@@ -226,10 +226,10 @@ func (c *Controller) validateSearchDates(path, ip string, req *SearchRequest) er
 // validateSearchStatusEnums validates VerifiedStatus and LockedStatus.
 func (c *Controller) validateSearchStatusEnums(path, ip string, req *SearchRequest) error {
 	validVerifiedStatus := map[string]bool{
-		QueryValueAny:    true,
-		"verified":       true,
-		"unverified":     true,
-		"false_positive": true,
+		QueryValueAny:                   true,
+		VerificationStatusCorrect:       true,
+		VerificationStatusUnverified:    true,
+		VerificationStatusFalsePositive: true,
 	}
 	if req.VerifiedStatus == "" {
 		req.VerifiedStatus = QueryValueAny

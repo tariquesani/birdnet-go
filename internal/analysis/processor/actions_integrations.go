@@ -25,6 +25,15 @@ import (
 // See: https://github.com/tphakala/birdnet-go/discussions/1759
 type NoteWithBirdImage struct {
 	datastore.Note
+
+	// Suppress redundant fields from embedded Note that duplicate explicit fields below.
+	// Note.ID duplicates DetectionID (both carry the database primary key).
+	// Note.Source duplicates SourceID (both carry the audio source identifier).
+	// These nil-pointer shadows with omitempty prevent the embedded fields from
+	// leaking into the JSON payload (GitHub #109).
+	ID     *struct{} `json:"ID,omitempty"`     // Suppressed: use detectionId instead
+	Source *struct{} `json:"Source,omitempty"` // Suppressed: use sourceId instead
+
 	DetectionID uint                    `json:"detectionId"` // Database ID for URL construction (e.g., /api/v2/audio/{id})
 	SourceID    string                  `json:"sourceId"`    // Audio source ID for HA filtering (added for HA discovery)
 	BirdImage   imageprovider.BirdImage `json:"BirdImage"`   // PascalCase for backward compatibility - DO NOT CHANGE
@@ -95,10 +104,36 @@ func (a *BirdWeatherAction) Execute(_ context.Context, data any) error {
 			return nil
 		}
 
+		// Transient network errors (DNS, timeout, connection issues) are expected
+		// external failures. Log at warn level and return a retryable error without
+		// generating Sentry noise. The job queue handles retry with backoff.
+		if errors.IsTransientNetworkError(err) {
+			sanitizedErr := privacy.WrapError(err)
+			GetLogger().Warn("BirdWeather upload failed due to transient network issue",
+				logger.String("component", "analysis.processor.actions"),
+				logger.String("detection_id", a.CorrelationID),
+				logger.Error(sanitizedErr),
+				logger.String("species", a.Result.Species.CommonName),
+				logger.String("scientific_name", a.Result.Species.ScientificName),
+				logger.Float64("confidence", a.Result.Confidence),
+				logger.Bool("retry_enabled", a.RetryConfig.Enabled),
+				logger.String("operation", "birdweather_upload_transient"))
+			// Return error to trigger retry, but use CategoryNetwork to avoid Sentry reporting
+			return errors.New(err).
+				Component("analysis.processor").
+				Category(errors.CategoryNetwork).
+				Context("operation", "birdweather_upload").
+				Context("species", a.Result.Species.CommonName).
+				Context("confidence", a.Result.Confidence).
+				Context("integration", "birdweather").
+				Context("retryable", true).
+				Build()
+		}
+
 		// Sanitize error before logging (only for actual errors, not expected conditions)
 		sanitizedErr := privacy.WrapError(err)
 
-		// Add structured logging for actual errors
+		// Add structured logging for actual errors (non-transient failures)
 		GetLogger().Error("Failed to upload to BirdWeather",
 			logger.String("component", "analysis.processor.actions"),
 			logger.String("detection_id", a.CorrelationID),
@@ -111,8 +146,7 @@ func (a *BirdWeatherAction) Execute(_ context.Context, data any) error {
 			logger.String("operation", "birdweather_upload"))
 		// BirdWeather failures are handled by the alerting rule engine
 		// (integration.birdweather_failed), so no explicit notification here.
-		// Network and API errors are typically transient and may succeed on retry:
-		// - Temporary network outages
+		// Non-transient API errors may succeed on retry:
 		// - API rate limiting
 		// - Server-side temporary failures
 		// The job queue will handle exponential backoff for these retryable errors
@@ -124,7 +158,7 @@ func (a *BirdWeatherAction) Execute(_ context.Context, data any) error {
 			Context("confidence", a.Result.Confidence).
 			Context("clip_name", a.Result.ClipName).
 			Context("integration", "birdweather").
-			Context("retryable", true). // Network/API errors are typically retryable
+			Context("retryable", true). // API errors are typically retryable
 			Build()
 	}
 
@@ -194,6 +228,13 @@ func (a *MqttAction) Execute(_ context.Context, data any) error {
 	if detectionID > 0 {
 		note.ID = detectionID
 	}
+
+	// NOTE: ClipName is always included in the MQTT payload, even though the
+	// audio file may not be on disk yet. Audio export runs independently after
+	// the CompositeAction completes. Home Assistant and other MQTT consumers
+	// that construct audio URLs from ClipName should handle 404/503 responses
+	// gracefully, or use the detection ID-based audio endpoint which has
+	// built-in wait-for-encoding support.
 
 	// Wrap note with bird image and include detection ID and SourceID
 	noteWithBirdImage := NoteWithBirdImage{
@@ -366,6 +407,14 @@ func (a *SSEAction) Execute(_ context.Context, data any) error {
 
 	// Convert Result to Note for SSEBroadcaster (backward compatible SSE payload)
 	note := datastore.NoteFromResult(&a.Result)
+
+	// NOTE: ClipName is always included in the SSE payload, even though the audio
+	// file may not be on disk yet. Audio export runs as a separate independent
+	// action after the DB -> SSE -> MQTT composite completes. The media API
+	// handles this race gracefully: waitForAudioFile() polls for the file with
+	// retries, and returns 503 + Retry-After if it's still being encoded.
+	// This is better than clearing ClipName, which would prevent the frontend
+	// from ever showing the audio player for the detection.
 
 	// Broadcast the detection with error handling
 	if err := a.SSEBroadcaster(&note, &birdImage); err != nil {

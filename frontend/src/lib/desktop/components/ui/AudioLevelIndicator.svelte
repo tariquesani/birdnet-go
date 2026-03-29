@@ -2,6 +2,7 @@
   import { cn } from '$lib/utils/cn';
   import ReconnectingEventSource from 'reconnecting-eventsource';
   import { Mic, CirclePlay, CircleStop, Check } from '@lucide/svelte';
+  import { dropdown } from '$lib/utils/transitions';
   import { loggers } from '$lib/utils/logger';
   import { fetchWithCSRF } from '$lib/utils/api';
   import { buildAppUrl } from '$lib/utils/urlHelpers';
@@ -98,6 +99,7 @@
       });
 
       audioElementRef.addEventListener('error', _e => {
+        if (!playingSource) return; // Ignore errors from cleanup
         showStatusMessage('Playback error');
         isPlaying = false;
         stopPlayback();
@@ -202,8 +204,12 @@
         }
       };
 
-      eventSource.onerror = (error: Event) => {
-        logger.error('Audio level SSE error:', error);
+      eventSource.onerror = () => {
+        // EventSource onerror receives an Event (not an Error); log a descriptive message
+        logger.warn('Audio level SSE error, will auto-reconnect', null, {
+          component: 'AudioLevelIndicator',
+          action: 'sseConnection',
+        });
         // ReconnectingEventSource handles reconnection automatically
         // No need for manual reconnection logic
       };
@@ -222,15 +228,22 @@
     }
   }
 
-  // Show status message
+  // Show status message.
+  // Use queueMicrotask to defer state mutations so they never occur
+  // synchronously inside a $derived or $effect evaluation, which would
+  // trigger Svelte 5's state_unsafe_mutation error.
   function showStatusMessage(message: string) {
-    statusMessage = message;
-    showStatus = true;
+    queueMicrotask(() => {
+      statusMessage = message;
+      showStatus = true;
+    });
   }
 
-  // Hide status message
+  // Hide status message (deferred for the same reason as showStatusMessage).
   function hideStatusMessage() {
-    showStatus = false;
+    queueMicrotask(() => {
+      showStatus = false;
+    });
   }
 
   // PERFORMANCE OPTIMIZATION: Use cached audio element from $derived
@@ -468,16 +481,17 @@
     hideStatusMessage();
     stopHeartbeat();
 
-    const el = getAudioElement();
-    if (el) {
-      el.pause();
-      el.src = '';
-      el.load();
-    }
-
+    // Destroy HLS instance FIRST (before touching the audio element)
     if (hlsInstance) {
       hlsInstance.destroy();
       hlsInstance = null;
+    }
+
+    const el = getAudioElement();
+    if (el) {
+      el.pause();
+      el.removeAttribute('src'); // Don't use el.src = '' which triggers error events
+      // Don't call el.load() -- removeAttribute is sufficient
     }
 
     const previousSource = playingSource;
@@ -566,7 +580,7 @@
 
         if (audioElementRef) {
           audioElementRef.pause();
-          audioElementRef.src = '';
+          audioElementRef.removeAttribute('src');
           audioElementRef.remove();
           audioElementRef = null;
         }
@@ -636,6 +650,8 @@
     {#if dropdownOpen}
       <div
         bind:this={dropdownRef}
+        in:dropdown
+        out:dropdown={{ duration: 100 }}
         role="menu"
         aria-label="Audio Source Selection"
         class="audio-dropdown absolute top-full mt-2 w-72 sm:w-80 max-w-[calc(100vw-2rem)] bg-[var(--color-base-100)] rounded-lg shadow-xl border border-[var(--color-base-300)] overflow-hidden flex flex-col z-50"

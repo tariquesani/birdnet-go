@@ -15,6 +15,10 @@ import (
 // Funcs provides common template functions available to all notification templates.
 // This includes string manipulation functions that users expect from template systems
 // like Hugo/Helm but are not part of Go's text/template builtins.
+//
+// Note: jsonEscape is intentionally NOT included here. Webhook templates have
+// their data pre-escaped by jsonEscapeTemplateMap before template execution,
+// so exposing jsonEscape in templates would cause double-escaping.
 var Funcs = template.FuncMap{
 	"title":      cases.Title(language.English).String,
 	"upper":      strings.ToUpper,

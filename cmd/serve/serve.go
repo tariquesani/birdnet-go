@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tphakala/birdnet-go/internal/analysis"
 	"github.com/tphakala/birdnet-go/internal/app"
+	"github.com/tphakala/birdnet-go/internal/audiocore/engine"
 	"github.com/tphakala/birdnet-go/internal/conf"
 )
 
@@ -23,12 +24,40 @@ This command initializes all subsystems (audio capture, BirdNET model,
 web interface, database) and runs until interrupted.
 
 The "realtime" command is an alias for backward compatibility.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Print system details early, before any service starts.
+			analysis.PrintSystemDetails(settings)
+
+			// Initialize metrics before services that depend on them.
+			metrics, err := analysis.InitializeMetrics()
+			if err != nil {
+				return err
+			}
+
+			// Create the AudioEngine with a nil scheduler; the scheduler
+			// depends on SunCalc and ControlChan that are only available
+			// after APIServerService.Start(), so it is set later via
+			// AudioEngine.SetScheduler().
+			audioEngine := engine.New(cmd.Context(), &engine.Config{
+				FFmpegPath:           settings.Realtime.Audio.FfmpegPath,
+				SoxPath:              settings.Realtime.Audio.SoxPath,
+				Transport:            settings.Realtime.RTSP.Transport,
+				FFmpegParameters:     settings.Realtime.RTSP.FFmpegParameters,
+				Debug:                settings.Debug,
+				CaptureBufferSeconds: settings.Realtime.ExtendedCapture.EffectiveCaptureBufferSeconds(settings.Realtime.Audio.Export.PreCapture),
+			}, nil)
+			defer audioEngine.Stop()
+
+			// Create services. Registration order determines start order;
+			// shutdown happens in reverse within each tier.
+			bnAnalyzer := analysis.NewBirdNETAnalyzer(settings)
+			dbService := analysis.NewDatabaseService(settings, metrics)
+			apiService := analysis.NewAPIServerService(settings, bnAnalyzer, dbService, metrics, audioEngine)
+			audioService := analysis.NewAudioPipelineService(settings, bnAnalyzer, dbService, apiService, audioEngine)
+
 			application := app.New()
 			app.SetGlobal(application)
-			application.Register(app.NewLegacyService("birdnet-go", func(quit <-chan struct{}) error {
-				return analysis.RealtimeAnalysisWithQuit(settings, quit)
-			}))
+			application.Register(bnAnalyzer, dbService, apiService, audioService)
 
 			if err := application.Start(cmd.Context()); err != nil {
 				return err

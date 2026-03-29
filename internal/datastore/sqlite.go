@@ -32,6 +32,10 @@ type SQLiteStore struct {
 	// dbstatAvailable caches whether the dbstat virtual table exists.
 	// 0 = unchecked, 1 = available, -1 = not available.
 	dbstatAvailable int32
+
+	// Guards to prevent starting monitoring loops more than once.
+	integrityOnce     sync.Once
+	walCheckpointOnce sync.Once
 }
 
 func validateSQLiteConfig() error {
@@ -216,8 +220,16 @@ func (s *SQLiteStore) Open() error {
 		gormLogger = NewGormLogger(500*time.Millisecond, gormlogger.Warn, s.metrics)
 	}
 
+	// Build DSN with pragmas as query parameters so they apply to every
+	// connection opened by the pool, not just the first one.  When pragmas
+	// are set via Exec() after gorm.Open(), only the connection that
+	// happens to execute the statement gets them; new pool connections
+	// remain at SQLite defaults and miss busy_timeout entirely, leading
+	// to immediate "database is locked" errors under concurrency.
+	dsn := buildSQLiteDSN(dbPath, "_journal_mode=WAL&_busy_timeout=30000&_foreign_keys=ON&_synchronous=NORMAL&_cache_size=-4000")
+
 	// Open SQLite database with GORM
-	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger: gormLogger,
 	})
 	if err != nil {
@@ -236,7 +248,13 @@ func (s *SQLiteStore) Open() error {
 		return enhancedErr
 	}
 
-	// Set SQLite pragmas for better performance
+	// Configure connection pool for SQLite.
+	// SQLite only supports a single writer at a time.  With Go's
+	// database/sql connection pool, multiple goroutines can obtain
+	// separate connections and attempt concurrent writes, causing
+	// "database is locked" errors even with busy_timeout set.
+	// Limiting to one open connection serializes all database access
+	// through a single connection, eliminating write contention.
 	sqlDB, err := db.DB()
 	if err != nil {
 		return errors.New(err).
@@ -245,24 +263,7 @@ func (s *SQLiteStore) Open() error {
 			Context("operation", "get_underlying_sqldb").
 			Build()
 	}
-
-	// Set pragmas
-	pragmas := []string{
-		"PRAGMA foreign_keys=ON",    // required for foreign key constraints
-		"PRAGMA journal_mode=WAL",   // faster writes
-		"PRAGMA synchronous=NORMAL", // faster writes
-		"PRAGMA cache_size=-4000",   // increase cache size
-		"PRAGMA temp_store=MEMORY",  // faster writes
-		"PRAGMA busy_timeout=30000", // wait up to 30s for locks (critical for concurrent access)
-	}
-
-	for _, pragma := range pragmas {
-		if _, err := sqlDB.Exec(pragma); err != nil {
-			GetLogger().Warn("Failed to set pragma",
-				logger.String("pragma", pragma),
-				logger.Error(err))
-		}
-	}
+	sqlDB.SetMaxOpenConns(1)
 
 	// Store the database connection
 	s.DB = db
@@ -309,9 +310,18 @@ func (s *SQLiteStore) Open() error {
 		s.StartMonitoring(30*time.Second, 5*time.Minute)
 	}
 
+	// Reset guards so loops can restart after a Close/Open cycle.
+	s.integrityOnce = sync.Once{}
+	s.walCheckpointOnce = sync.Once{}
+
 	// Start daily integrity check in the background (runs initial check immediately)
 	GetLogger().Debug("Starting daily integrity check loop")
 	s.startIntegrityCheckLoop()
+
+	// Start periodic WAL checkpoint to prevent unbounded WAL growth.
+	// SQLite's auto-checkpoint (1000 pages) may not fire reliably with
+	// GORM's connection pool because the page counter is per-connection.
+	s.startWALCheckpointLoop()
 
 	return nil
 }
@@ -322,28 +332,69 @@ const integrityCheckInterval = 24 * time.Hour
 // startIntegrityCheckLoop runs PRAGMA quick_check at startup and every 24 hours.
 // Uses the monitoring context for clean shutdown.
 func (s *SQLiteStore) startIntegrityCheckLoop() {
-	// Ensure monitoring context exists
-	s.monitoringMu.Lock()
-	if s.monitoringCtx == nil {
-		s.monitoringCtx, s.monitoringCancel = context.WithCancel(context.Background())
-	}
-	ctx := s.monitoringCtx
-	s.monitoringMu.Unlock()
-
-	// Run initial check immediately, then on interval
-	s.monitoringWg.Go(func() {
-		s.RunIntegrityCheck()
-
-		ticker := time.NewTicker(integrityCheckInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				s.RunIntegrityCheck()
-			}
+	s.integrityOnce.Do(func() {
+		// Ensure monitoring context exists
+		s.monitoringMu.Lock()
+		if s.monitoringCtx == nil {
+			s.monitoringCtx, s.monitoringCancel = context.WithCancel(context.Background())
 		}
+		ctx := s.monitoringCtx
+		s.monitoringMu.Unlock()
+
+		// Run initial check immediately, then on interval
+		s.monitoringWg.Go(func() {
+			s.RunIntegrityCheck()
+
+			ticker := time.NewTicker(integrityCheckInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					s.RunIntegrityCheck()
+				}
+			}
+		})
+	})
+}
+
+// legacyWALCheckpointInterval is how often a periodic passive WAL checkpoint runs
+// for the legacy SQLite store. Matches the v2 manager's interval.
+const legacyWALCheckpointInterval = 5 * time.Minute
+
+// startWALCheckpointLoop runs a passive WAL checkpoint periodically to prevent
+// unbounded WAL growth. Uses the monitoring context for clean shutdown.
+func (s *SQLiteStore) startWALCheckpointLoop() {
+	s.walCheckpointOnce.Do(func() {
+		// Ensure monitoring context exists
+		s.monitoringMu.Lock()
+		if s.monitoringCtx == nil {
+			s.monitoringCtx, s.monitoringCancel = context.WithCancel(context.Background())
+		}
+		ctx := s.monitoringCtx
+		s.monitoringMu.Unlock()
+
+		s.monitoringWg.Go(func() {
+			ticker := time.NewTicker(legacyWALCheckpointInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := s.DB.Exec("PRAGMA wal_checkpoint(PASSIVE)").Error; err != nil {
+						GetLogger().Warn("periodic WAL checkpoint failed",
+							logger.Error(err),
+							logger.String("operation", "periodic_wal_checkpoint"))
+					}
+				}
+			}
+		})
+
+		GetLogger().Debug("started periodic WAL checkpoint",
+			logger.String("interval", legacyWALCheckpointInterval.String()),
+			logger.String("mode", "PASSIVE"))
 	})
 }
 

@@ -40,9 +40,9 @@ func buildTestConfig(t *testing.T, labels []string) (cfg *Config, cleanup func()
 
 	// Create lookup table entries for tests
 	// The LabelType and TaxonomicClass tables should be created by Initialize()
-	labelTypeRepo := repository.NewLabelTypeRepository(db, false)
-	taxClassRepo := repository.NewTaxonomicClassRepository(db, false)
-	modelRepo := repository.NewModelRepository(db, false, false)
+	labelTypeRepo := repository.NewLabelTypeRepository(db, nil, false)
+	taxClassRepo := repository.NewTaxonomicClassRepository(db, nil, false)
+	modelRepo := repository.NewModelRepository(db, nil, false, false)
 
 	ctx := t.Context()
 
@@ -61,13 +61,13 @@ func buildTestConfig(t *testing.T, labels []string) (cfg *Config, cleanup func()
 	avesClassID := avesClass.ID
 
 	// Create repositories (useV2Prefix = false for SQLite, isMySQL = false)
-	detectionRepo := repository.NewDetectionRepository(db, false, false)
-	labelRepo := repository.NewLabelRepository(db, false, false)
-	sourceRepo := repository.NewAudioSourceRepository(db, false, false)
-	weatherRepo := repository.NewWeatherRepository(db, false, false)
-	imageCacheRepo := repository.NewImageCacheRepository(db, labelRepo, false, false)
-	thresholdRepo := repository.NewDynamicThresholdRepository(db, labelRepo, false, false)
-	notificationRepo := repository.NewNotificationHistoryRepository(db, labelRepo, false, false)
+	detectionRepo := repository.NewDetectionRepository(db, nil, false, false)
+	labelRepo := repository.NewLabelRepository(db, nil, false, false)
+	sourceRepo := repository.NewAudioSourceRepository(db, nil, false, false)
+	weatherRepo := repository.NewWeatherRepository(db, nil, false, false)
+	imageCacheRepo := repository.NewImageCacheRepository(db, nil, labelRepo, false, false)
+	thresholdRepo := repository.NewDynamicThresholdRepository(db, nil, labelRepo, false, false)
+	notificationRepo := repository.NewNotificationHistoryRepository(db, nil, labelRepo, false, false)
 
 	cfg = &Config{
 		Manager:            manager,
@@ -612,10 +612,11 @@ func TestV2OnlyDatastore_SearchNotes(t *testing.T) {
 	}
 
 	// Search notes
-	notes, err := ds.SearchNotes("Passer", true, 10, 0)
+	notes, total, err := ds.SearchNotes("Passer", true, 10, 0)
 	require.NoError(t, err)
 	// Search may not work perfectly without full-text search, but shouldn't error
 	assert.NotNil(t, notes)
+	assert.Equal(t, int64(len(notes)), total, "total should match returned rows for limit=10, offset=0")
 }
 
 func TestV2OnlyDatastore_GetLastDetections(t *testing.T) {

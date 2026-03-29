@@ -6,9 +6,9 @@ import (
 
 	"github.com/tphakala/birdnet-go/internal/analysis/processor"
 	apiv2 "github.com/tphakala/birdnet-go/internal/api/v2"
+	"github.com/tphakala/birdnet-go/internal/audiocore/soundlevel"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/logger"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observability"
 )
 
@@ -18,14 +18,14 @@ type SoundLevelManager struct {
 	isRunning      bool
 	doneChan       chan struct{}
 	wg             sync.WaitGroup
-	soundLevelChan chan myaudio.SoundLevelData
+	soundLevelChan chan soundlevel.SoundLevelData
 	proc           *processor.Processor
 	apiController  *apiv2.Controller
 	metrics        *observability.Metrics
 }
 
 // NewSoundLevelManager creates a new sound level manager
-func NewSoundLevelManager(soundLevelChan chan myaudio.SoundLevelData, proc *processor.Processor, apiController *apiv2.Controller, metrics *observability.Metrics) *SoundLevelManager {
+func NewSoundLevelManager(soundLevelChan chan soundlevel.SoundLevelData, proc *processor.Processor, apiController *apiv2.Controller, metrics *observability.Metrics) *SoundLevelManager {
 	return &SoundLevelManager{
 		soundLevelChan: soundLevelChan,
 		proc:           proc,
@@ -50,9 +50,6 @@ func (m *SoundLevelManager) Start() error {
 		log.Debug("sound level monitoring is disabled")
 		return nil
 	}
-
-	// Update debug log levels
-	updateSoundLevelDebugSettings()
 
 	// Register sound level processors for all active sources
 	if err := registerSoundLevelProcessorsForActiveSources(settings); err != nil {
@@ -132,15 +129,4 @@ func (m *SoundLevelManager) IsRunning() bool {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	return m.isRunning
-}
-
-// updateSoundLevelDebugSettings updates the debug log levels for sound level components
-func updateSoundLevelDebugSettings() {
-	settings := conf.Setting()
-
-	// Note: With the centralized logger, log levels are managed via configuration.
-	// Debug checks happen at call sites using conf.Setting().Realtime.Audio.SoundLevel.Debug
-
-	// Update the myaudio sound level logger
-	myaudio.UpdateSoundLevelDebugSetting(settings.Realtime.Audio.SoundLevel.Debug)
 }

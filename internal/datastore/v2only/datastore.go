@@ -284,6 +284,13 @@ func New(cfg *Config) (*Datastore, error) {
 		dbCounters:         dbCounters,
 	}
 	ds.names.Store(nm)
+
+	// Start periodic WAL checkpoint for SQLite to prevent unbounded WAL growth.
+	// The auto-checkpoint mechanism may not fire reliably with connection pooling.
+	if sqliteMgr, ok := cfg.Manager.(*v2.SQLiteManager); ok {
+		sqliteMgr.StartPeriodicCheckpoint()
+	}
+
 	return ds, nil
 }
 
@@ -339,8 +346,22 @@ func (ds *Datastore) GetDBCounters() *dbstats.Counters {
 // Close closes the datastore.
 func (ds *Datastore) Close() error {
 	if ds.manager != nil {
+		log := logger.Global().Module("datastore")
+
+		// Stop periodic WAL checkpoint before the final TRUNCATE checkpoint.
+		if sqliteMgr, ok := ds.manager.(*v2.SQLiteManager); ok {
+			sqliteMgr.StopPeriodicCheckpoint()
+		}
 		if !ds.manager.IsMySQL() {
-			_ = ds.manager.CheckpointWAL()
+			log.Info("performing SQLite WAL checkpoint",
+				logger.String("operation", "wal_checkpoint_before_shutdown"),
+				logger.String("mode", "v2only"))
+			if err := ds.manager.CheckpointWAL(); err != nil {
+				log.Warn("WAL checkpoint failed",
+					logger.Error(err),
+					logger.String("operation", "wal_checkpoint"),
+					logger.Bool("continuing_shutdown", true))
+			}
 		}
 		return ds.manager.Close()
 	}
@@ -730,6 +751,7 @@ func (ds *Datastore) detectionToNote(det *entities.Detection) datastore.Note {
 		Time:           timeStr,
 		ScientificName: scientificName,
 		CommonName:     commonName,
+		SpeciesCode:    ds.speciesCodeMap[scientificName],
 		Confidence:     det.Confidence,
 		Latitude:       lat,
 		Longitude:      lon,
@@ -1270,7 +1292,8 @@ func (ds *Datastore) GetAllDetectedSpecies() ([]datastore.Note, error) {
 }
 
 // SearchNotes searches notes by query string.
-func (ds *Datastore) SearchNotes(query string, sortAscending bool, limit, offset int) ([]datastore.Note, error) {
+// Returns the matching notes, the total count of matching records (before pagination), and any error.
+func (ds *Datastore) SearchNotes(query string, sortAscending bool, limit, offset int) ([]datastore.Note, int64, error) {
 	ctx := context.Background()
 	filters := &repository.SearchFilters{
 		Query:    query,
@@ -1280,9 +1303,9 @@ func (ds *Datastore) SearchNotes(query string, sortAscending bool, limit, offset
 		SortDesc: !sortAscending,
 	}
 
-	dets, _, err := ds.detection.Search(ctx, filters)
+	dets, total, err := ds.detection.Search(ctx, filters)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Load relations (review, lock, label, source) for accurate virtual fields
@@ -1292,7 +1315,7 @@ func (ds *Datastore) SearchNotes(query string, sortAscending bool, limit, offset
 		}
 	}
 
-	return ds.detectionsToNotes(dets), nil
+	return ds.detectionsToNotes(dets), total, nil
 }
 
 // SearchNotesAdvanced performs advanced search with filters.
@@ -1779,14 +1802,6 @@ func (ds *Datastore) CountSpeciesDetections(species, date, hour string, duration
 		StartTime: startTime,
 		EndTime:   endTime,
 	}
-	_, count, err := ds.detection.Search(ctx, filters)
-	return count, err
-}
-
-// CountSearchResults counts search results.
-func (ds *Datastore) CountSearchResults(query string) (int64, error) {
-	ctx := context.Background()
-	filters := &repository.SearchFilters{Query: query}
 	_, count, err := ds.detection.Search(ctx, filters)
 	return count, err
 }

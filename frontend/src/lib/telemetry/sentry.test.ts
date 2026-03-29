@@ -58,6 +58,34 @@ describe('beforeSend privacy filtering', () => {
     expect(beforeSend).toBeTypeOf('function');
   });
 
+  it('drops events where originalException has status 401', () => {
+    const error = Object.assign(new Error('Unauthorized'), { status: 401 });
+    const event = { type: undefined } as Sentry.ErrorEvent;
+    const result = beforeSend?.(event, { originalException: error } as Sentry.EventHint);
+    expect(result).toBeNull();
+  });
+
+  it('drops events where originalException has status 403', () => {
+    const error = Object.assign(new Error('Forbidden'), { status: 403 });
+    const event = { type: undefined } as Sentry.ErrorEvent;
+    const result = beforeSend?.(event, { originalException: error } as Sentry.EventHint);
+    expect(result).toBeNull();
+  });
+
+  it('drops events where originalException has status 409', () => {
+    const error = Object.assign(new Error('Conflict'), { status: 409 });
+    const event = { type: undefined } as Sentry.ErrorEvent;
+    const result = beforeSend?.(event, { originalException: error } as Sentry.EventHint);
+    expect(result).toBeNull();
+  });
+
+  it('passes through non-auth errors', () => {
+    const error = Object.assign(new Error('Server Error'), { status: 500 });
+    const event = { type: undefined } as Sentry.ErrorEvent;
+    const result = beforeSend?.(event, { originalException: error } as Sentry.EventHint);
+    expect(result).not.toBeNull();
+  });
+
   it('strips user data', () => {
     const event = { type: undefined, user: { ip_address: '1.2.3.4' } } as Sentry.ErrorEvent;
     const result = beforeSend?.(event, {} as Sentry.EventHint);
@@ -71,22 +99,33 @@ describe('beforeSend privacy filtering', () => {
     expect((result as Sentry.ErrorEvent).server_name).toBeUndefined();
   });
 
-  it('scrubs main event request URL query params', () => {
+  it('scrubs same-origin request URL to path only', () => {
+    const origin = globalThis.location.origin;
     const event = {
       type: undefined,
-      request: { url: 'https://birdnet.local/settings?apiKey=secret&token=abc' },
+      request: { url: `${origin}/settings?apiKey=secret&token=abc` },
     } as Sentry.ErrorEvent;
     const result = beforeSend?.(event, {} as Sentry.EventHint) as Sentry.ErrorEvent;
     expect(result.request?.url).toBe('/settings');
   });
 
-  it('scrubs breadcrumb fetch URLs to path only', () => {
+  it('preserves external origin in request URL', () => {
+    const event = {
+      type: undefined,
+      request: { url: 'https://api.example.com/v1/data?key=secret' },
+    } as Sentry.ErrorEvent;
+    const result = beforeSend?.(event, {} as Sentry.EventHint) as Sentry.ErrorEvent;
+    expect(result.request?.url).toBe('https://api.example.com/v1/data');
+  });
+
+  it('scrubs same-origin breadcrumb URLs to path only', () => {
+    const origin = globalThis.location.origin;
     const event = {
       type: undefined,
       breadcrumbs: [
         {
           category: 'fetch',
-          data: { url: 'https://birdnet.local/api/v2/settings?id=secret' },
+          data: { url: `${origin}/api/v2/settings?id=secret` },
         },
         {
           category: 'ui.click',
@@ -143,6 +182,14 @@ describe('captureApiError', () => {
     expect(Sentry.captureException).not.toHaveBeenCalled();
   });
 
+  it('skips 409 conflict errors', () => {
+    const error = new Error('Conflict') as Error & { status: number; isNetworkError: boolean };
+    error.status = 409;
+    error.isNetworkError = false;
+    captureApiError(error);
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+  });
+
   it('captures 500 errors with error severity', () => {
     const error = new Error('Server Error') as Error & { status: number; isNetworkError: boolean };
     error.status = 500;
@@ -164,6 +211,24 @@ describe('captureError', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     initSentry({ dsn: 'https://test@sentry.io/123', systemId: 'sys-1', version: '1.0.0' });
+  });
+
+  it('skips errors with status 401', () => {
+    const error = Object.assign(new Error('Unauthorized'), { status: 401 });
+    captureError(error, { category: 'api' });
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it('skips errors with status 403', () => {
+    const error = Object.assign(new Error('Forbidden'), { status: 403 });
+    captureError(error, { category: 'api' });
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it('skips errors with status 409', () => {
+    const error = Object.assign(new Error('Conflict'), { status: 409 });
+    captureError(error, { category: 'api' });
+    expect(Sentry.captureException).not.toHaveBeenCalled();
   });
 
   it('captures Error with logger tag', () => {
@@ -197,5 +262,84 @@ describe('captureError', () => {
 
     expect(() => captureError(error)).not.toThrow();
     expect(Sentry.captureException).toHaveBeenCalledWith(error);
+  });
+
+  it('scrubs URL-like string values in context', () => {
+    const error = new Error('test error');
+    const mockScope = {
+      setLevel: vi.fn(),
+      setTag: vi.fn(),
+      setContext: vi.fn(),
+    };
+    vi.mocked(Sentry.withScope).mockImplementation(((callback: (scope: unknown) => void) => {
+      callback(mockScope);
+    }) as typeof Sentry.withScope);
+
+    captureError(error, {
+      category: 'ui',
+      endpoint: 'https://birdnet.local/api/v2/settings?apiKey=secret',
+      path: '/api/v2/detections?token=abc',
+      action: 'save',
+    });
+
+    expect(mockScope.setContext).toHaveBeenCalledWith('logger', {
+      endpoint: 'https://birdnet.local/api/v2/settings',
+      path: '/api/v2/detections',
+      action: 'save',
+    });
+  });
+
+  it('redacts sensitive key names in context', () => {
+    const error = new Error('test error');
+    const mockScope = {
+      setLevel: vi.fn(),
+      setTag: vi.fn(),
+      setContext: vi.fn(),
+    };
+    vi.mocked(Sentry.withScope).mockImplementation(((callback: (scope: unknown) => void) => {
+      callback(mockScope);
+    }) as typeof Sentry.withScope);
+
+    captureError(error, {
+      category: 'auth',
+      token: 'my-secret-token',
+      password: 'hunter2',
+      email: 'user@example.com',
+      ip: '192.168.1.1',
+      action: 'login',
+    });
+
+    expect(mockScope.setContext).toHaveBeenCalledWith('logger', {
+      token: '[redacted]',
+      password: '[redacted]',
+      email: '[redacted]',
+      ip: '[redacted]',
+      action: 'login',
+    });
+  });
+
+  it('passes non-sensitive non-URL values through unchanged', () => {
+    const error = new Error('test error');
+    const mockScope = {
+      setLevel: vi.fn(),
+      setTag: vi.fn(),
+      setContext: vi.fn(),
+    };
+    vi.mocked(Sentry.withScope).mockImplementation(((callback: (scope: unknown) => void) => {
+      callback(mockScope);
+    }) as typeof Sentry.withScope);
+
+    captureError(error, {
+      category: 'ui',
+      component: 'Dashboard',
+      count: 42,
+      enabled: true,
+    });
+
+    expect(mockScope.setContext).toHaveBeenCalledWith('logger', {
+      component: 'Dashboard',
+      count: 42,
+      enabled: true,
+    });
   });
 });

@@ -187,14 +187,14 @@ func (ctx *TestContext) setupV2DB(t *testing.T, tmpDir string) {
 
 	// Create repositories (useV2Prefix = false for direct table access in tests, isMySQL = false for SQLite)
 	db := mgr.DB()
-	ctx.DetectionRepo = repository.NewDetectionRepository(db, false, false)
-	ctx.LabelRepo = repository.NewLabelRepository(db, false, false)
-	ctx.ModelRepo = repository.NewModelRepository(db, false, false)
-	ctx.SourceRepo = repository.NewAudioSourceRepository(db, false, false)
-	ctx.WeatherRepo = repository.NewWeatherRepository(db, false, false)
-	ctx.ImageCacheRepo = repository.NewImageCacheRepository(db, ctx.LabelRepo, false, false)
-	ctx.ThresholdRepo = repository.NewDynamicThresholdRepository(db, ctx.LabelRepo, false, false)
-	ctx.NotificationRepo = repository.NewNotificationHistoryRepository(db, ctx.LabelRepo, false, false)
+	ctx.DetectionRepo = repository.NewDetectionRepository(db, nil, false, false)
+	ctx.LabelRepo = repository.NewLabelRepository(db, nil, false, false)
+	ctx.ModelRepo = repository.NewModelRepository(db, nil, false, false)
+	ctx.SourceRepo = repository.NewAudioSourceRepository(db, nil, false, false)
+	ctx.WeatherRepo = repository.NewWeatherRepository(db, nil, false, false)
+	ctx.ImageCacheRepo = repository.NewImageCacheRepository(db, nil, ctx.LabelRepo, false, false)
+	ctx.ThresholdRepo = repository.NewDynamicThresholdRepository(db, nil, ctx.LabelRepo, false, false)
+	ctx.NotificationRepo = repository.NewNotificationHistoryRepository(db, nil, ctx.LabelRepo, false, false)
 
 	// Populate lookup tables for V2 normalized schema
 	ctx.setupLookupTables(t)
@@ -683,8 +683,8 @@ func (s *testLegacyInterface) SpeciesDetections(_, _, _ string, _ int, _ bool, _
 }
 func (s *testLegacyInterface) GetLastDetections(_ int) ([]datastore.Note, error) { return nil, nil }
 func (s *testLegacyInterface) GetAllDetectedSpecies() ([]datastore.Note, error)  { return nil, nil }
-func (s *testLegacyInterface) SearchNotes(_ string, _ bool, _, _ int) ([]datastore.Note, error) {
-	return nil, nil
+func (s *testLegacyInterface) SearchNotes(_ string, _ bool, _, _ int) ([]datastore.Note, int64, error) {
+	return nil, 0, nil
 }
 func (s *testLegacyInterface) SearchNotesAdvanced(_ *datastore.AdvancedSearchFilters) ([]datastore.Note, int64, error) {
 	return nil, 0, nil
@@ -717,7 +717,6 @@ func (s *testLegacyInterface) GetHourlyDetections(_, _ string, _, _, _ int) ([]d
 func (s *testLegacyInterface) CountSpeciesDetections(_, _, _ string, _ int) (int64, error) {
 	return 0, nil
 }
-func (s *testLegacyInterface) CountSearchResults(_ string) (int64, error)        { return 0, nil }
 func (s *testLegacyInterface) Transaction(_ func(tx *gorm.DB) error) error       { return nil }
 func (s *testLegacyInterface) LockNote(_ string) error                           { return nil }
 func (s *testLegacyInterface) UnlockNote(_ string) error                         { return nil }

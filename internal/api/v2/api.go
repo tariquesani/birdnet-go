@@ -20,6 +20,8 @@ import (
 	"github.com/tphakala/birdnet-go/internal/alerting"
 	"github.com/tphakala/birdnet-go/internal/analysis/processor"
 	"github.com/tphakala/birdnet-go/internal/api/auth"
+	"github.com/tphakala/birdnet-go/internal/audiocore"
+	"github.com/tphakala/birdnet-go/internal/audiocore/engine"
 	"github.com/tphakala/birdnet-go/internal/birdnet"
 	"github.com/tphakala/birdnet-go/internal/conf"
 	"github.com/tphakala/birdnet-go/internal/datastore"
@@ -29,7 +31,6 @@ import (
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"github.com/tphakala/birdnet-go/internal/imageprovider"
 	"github.com/tphakala/birdnet-go/internal/logger"
-	"github.com/tphakala/birdnet-go/internal/myaudio"
 	"github.com/tphakala/birdnet-go/internal/observability"
 	"github.com/tphakala/birdnet-go/internal/securefs"
 	"github.com/tphakala/birdnet-go/internal/spectrogram"
@@ -90,7 +91,10 @@ type Controller struct {
 
 	// Audio level channel for SSE streaming
 	// TODO: Consider moving to a dedicated audio manager
-	audioLevelChan chan myaudio.AudioLevelData
+	audioLevelChan chan audiocore.AudioLevelData
+
+	// engine provides access to the unified audio subsystem (sources, buffers, routing).
+	engine *engine.AudioEngine
 
 	// V2Manager provides access to the v2 normalized database for stats and backup
 	V2Manager datastoreV2.Manager
@@ -155,6 +159,13 @@ func WithMetricsStore(store observability.MetricsStore) Option {
 func WithV2Manager(mgr datastoreV2.Manager) Option {
 	return func(c *Controller) {
 		c.V2Manager = mgr
+	}
+}
+
+// WithAudioEngine sets the AudioEngine for audio subsystem access.
+func WithAudioEngine(e *engine.AudioEngine) Option {
+	return func(c *Controller) {
+		c.engine = e
 	}
 }
 
@@ -249,11 +260,13 @@ func New(e *echo.Echo, ds datastore.Interface, settings *conf.Settings,
 // resolveAndValidateMediaPath resolves a potentially relative media path and ensures it exists as a directory.
 // Returns the absolute path and any error encountered.
 func resolveAndValidateMediaPath(configPath string) (string, error) {
-	if configPath == "" {
-		return "", fmt.Errorf("settings.realtime.audio.export.path must not be empty")
-	}
-
 	mediaPath := configPath
+	if mediaPath == "" {
+		mediaPath = defaultExportPath
+		GetLogger().Warn("Audio export path is empty, using default",
+			logger.String("default_path", defaultExportPath),
+		)
+	}
 
 	// Resolve relative path to absolute based on working directory
 	if !filepath.IsAbs(mediaPath) {
@@ -480,6 +493,24 @@ func (c *Controller) LoggingMiddleware() echo.MiddlewareFunc {
 			req := ctx.Request()
 			res := ctx.Response()
 
+			// Determine the actual status code. When a handler returns an
+			// *echo.HTTPError, Echo's centralized error handler has not yet
+			// executed at this point in the middleware chain, so res.Status
+			// is still the default 200. Extract the real code from the error.
+			status := res.Status
+			if err != nil {
+				var he *echo.HTTPError
+				if errors.As(err, &he) {
+					status = he.Code
+				} else if status < http.StatusBadRequest {
+					// Non-HTTP errors (e.g. database errors) won't have a
+					// status set yet — Echo's error handler runs after this
+					// middleware. Default to 500 to avoid logging failures
+					// as successes.
+					status = http.StatusInternalServerError
+				}
+			}
+
 			// Get tunnel info from context
 			isTunneled, _ := ctx.Get("is_tunneled").(bool)
 			tunnelProvider, _ := ctx.Get("tunnel_provider").(string)
@@ -489,7 +520,7 @@ func (c *Controller) LoggingMiddleware() echo.MiddlewareFunc {
 				logger.String("method", req.Method),
 				logger.String("path", req.URL.Path),
 				logger.String("query", req.URL.RawQuery),
-				logger.Int("status", res.Status),
+				logger.Int("status", status),
 				logger.String("ip", ctx.RealIP()), // Uses custom extractor
 				logger.Bool("tunneled", isTunneled),
 				logger.String("tunnel_provider", tunnelProvider),
@@ -713,8 +744,9 @@ type ErrorResponse struct {
 	ErrorParams   map[string]any `json:"error_params,omitempty"` // Interpolation parameters for error_key
 }
 
-// NewErrorResponse creates a new API error response
-func NewErrorResponse(err error, message string, code int) *ErrorResponse {
+// newErrorResponse creates a new API error response using the controller's
+// injected settings to decide whether to expose raw error details.
+func (c *Controller) newErrorResponse(err error, message string, code int) *ErrorResponse {
 	// Generate a random correlation ID (8 characters should be sufficient)
 	correlationID := generateCorrelationID()
 
@@ -722,8 +754,7 @@ func NewErrorResponse(err error, message string, code int) *ErrorResponse {
 	// paths, SQL errors, stack traces, etc. In production, use the
 	// sanitized message parameter instead.
 	var errorStr string
-	settings := conf.GetSettings()
-	if err != nil && settings != nil && settings.WebServer.Debug {
+	if err != nil && c.Settings != nil && c.Settings.WebServer.Debug {
 		errorStr = err.Error()
 	} else {
 		errorStr = message
@@ -758,7 +789,7 @@ func generateCorrelationID() string {
 
 // handleErrorInternal is the shared implementation for HandleError and HandleErrorWithKey.
 func (c *Controller) handleErrorInternal(ctx echo.Context, err error, message string, code int, errorKey string, errorParams map[string]any) error {
-	errorResp := NewErrorResponse(err, message, code)
+	errorResp := c.newErrorResponse(err, message, code)
 	errorResp.ErrorKey = errorKey
 	errorResp.ErrorParams = errorParams
 

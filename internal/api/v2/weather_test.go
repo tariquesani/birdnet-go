@@ -98,8 +98,8 @@ func TestGetDailyWeather(t *testing.T) {
 
 		// Check response content
 		assert.Equal(t, "2023-01-01", response.Date)
-		assert.Equal(t, time.Unix(1672559400, 0).UTC(), response.Sunrise)
-		assert.Equal(t, time.Unix(1672594800, 0).UTC(), response.Sunset)
+		assert.True(t, time.Unix(1672559400, 0).Equal(response.Sunrise), "sunrise time mismatch")
+		assert.True(t, time.Unix(1672594800, 0).Equal(response.Sunset), "sunset time mismatch")
 		assert.Equal(t, "Finland", response.Country)
 		assert.Equal(t, "Helsinki", response.CityName)
 	}
@@ -119,8 +119,9 @@ func setupWeatherTestEnvironment(t *testing.T) (*echo.Echo, *mocks.MockInterface
 
 	// Create a controller with the test datastore
 	controller := &Controller{
-		Group: e.Group("/api/v2"),
-		DS:    mockDS,
+		Settings: newValidTestSettings(),
+		Group:    e.Group("/api/v2"),
+		DS:       mockDS,
 	}
 
 	// We don't need to initialize routes for unit tests
@@ -586,8 +587,8 @@ func TestGetWeatherForDetection(t *testing.T) {
 		// Check response content
 		// Daily weather
 		assert.Equal(t, "2023-01-01", response.Daily.Date)
-		assert.Equal(t, time.Unix(1672559400, 0).UTC(), response.Daily.Sunrise)
-		assert.Equal(t, time.Unix(1672594800, 0).UTC(), response.Daily.Sunset)
+		assert.True(t, time.Unix(1672559400, 0).Equal(response.Daily.Sunrise), "sunrise time mismatch")
+		assert.True(t, time.Unix(1672594800, 0).Equal(response.Daily.Sunset), "sunset time mismatch")
 		assert.Equal(t, "Finland", response.Daily.Country)
 		assert.Equal(t, "Helsinki", response.Daily.CityName)
 
@@ -684,8 +685,8 @@ func TestGetLatestWeather(t *testing.T) {
 		// Daily weather should be present
 		assert.NotNil(t, response.Daily)
 		assert.Equal(t, "2023-01-01", response.Daily.Date)
-		assert.Equal(t, time.Unix(1672559400, 0).UTC(), response.Daily.Sunrise)
-		assert.Equal(t, time.Unix(1672594800, 0).UTC(), response.Daily.Sunset)
+		assert.True(t, time.Unix(1672559400, 0).Equal(response.Daily.Sunrise), "sunrise time mismatch")
+		assert.True(t, time.Unix(1672594800, 0).Equal(response.Daily.Sunset), "sunset time mismatch")
 		assert.Equal(t, "Finland", response.Daily.Country)
 		assert.Equal(t, "Helsinki", response.Daily.CityName)
 

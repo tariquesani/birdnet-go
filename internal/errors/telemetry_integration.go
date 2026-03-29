@@ -51,10 +51,12 @@ var (
 		"no route to host",
 		"connection refused",
 		"connection reset by peer",
-		"server misbehaving", // DNS failure
-		"no such host",       // DNS failure
+		"server misbehaving",    // DNS failure
+		"no such host",          // DNS failure
+		"dns resolution failed", // DNS failure (BirdWeather wrapper)
 		"network is unreachable",
 		"i/o timeout",
+		"context deadline exceeded", // Upload/request timeout
 		"tls handshake timeout",
 		"eof", // Connection lost (e.g., MQTT broker disconnect)
 	}
@@ -177,7 +179,19 @@ func shouldReportToSentry(ee *EnhancedError) bool {
 		}
 	}
 
-	// Filter out network infrastructure errors (user's network/DNS issues)
+	// Filter out "note not found" errors — these are expected transient conditions caused by
+	// race between write commit and read, or retention cleanup deleting records between
+	// ID assignment and lookup. Not code bugs.
+	if ee.Category == CategoryNotFound {
+		if strings.Contains(errorMsg, "note not found") {
+			return false
+		}
+	}
+
+	// Filter out network infrastructure errors (user's network/DNS issues).
+	// Filter network infrastructure noise. CategoryIntegration is deliberately excluded
+	// to avoid suppressing legitimate non-transient integration errors; transient network
+	// failures in integrations should use CategoryNetwork instead.
 	switch ee.Category { //nolint:exhaustive // only network-related categories need this filter
 	case CategoryNetwork, CategoryMQTTConnection, CategoryMQTTPublish, CategoryRTSP, CategoryHTTP:
 		for _, pattern := range networkNoisePatterns {

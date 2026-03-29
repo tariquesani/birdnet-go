@@ -100,6 +100,13 @@ vi.mock('$lib/utils/logger', () => ({
   })),
 }));
 
+// Mock transition utilities - transitions don't run in jsdom, use instant duration
+const instantTransition = () => ({ duration: 0, css: () => '' });
+vi.mock('$lib/utils/transitions', () => ({
+  dropdown: instantTransition,
+  flyout: instantTransition,
+}));
+
 // Mock toast notifications
 vi.mock('$lib/stores/toast', () => ({
   toastActions: {
@@ -135,6 +142,10 @@ const translations: Record<string, string> = {
   'common.aria.nextMonth': 'Next month',
   'forms.labels.showPassword': 'Show password',
   'forms.labels.hidePassword': 'Hide password',
+  'forms.labels.secretSet': 'Set',
+  'forms.labels.changeSecret': 'Change',
+  'forms.labels.cancelChange': 'Cancel',
+  'forms.labels.enterNewSecret': 'Enter new value',
   'forms.password.strength.label': 'Password Strength:',
   'forms.password.strength.levels.weak': 'Weak',
   'forms.password.strength.levels.fair': 'Fair',
@@ -395,6 +406,9 @@ vi.mock('$lib/utils/settingsApi.js', () => {
         mqtt: vi.fn().mockResolvedValue({ success: true, message: 'Test successful' }),
         database: vi.fn().mockResolvedValue({ success: true, message: 'Test successful' }),
         audio: vi.fn().mockResolvedValue({ success: true, message: 'Test successful' }),
+      },
+      rangeFilter: {
+        testSpecies: vi.fn().mockResolvedValue({ count: 0, species: [] }),
       },
       species: {
         search: vi.fn().mockResolvedValue([]),

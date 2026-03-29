@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/tphakala/birdnet-go/internal/datastore"
 	"github.com/tphakala/birdnet-go/internal/datastore/v2/entities"
 	"github.com/tphakala/birdnet-go/internal/errors"
 	"gorm.io/gorm"
@@ -13,6 +14,7 @@ import (
 // dynamicThresholdRepository implements DynamicThresholdRepository.
 type dynamicThresholdRepository struct {
 	db          *gorm.DB
+	metrics     *datastore.Metrics
 	labelRepo   LabelRepository
 	useV2Prefix bool
 	isMySQL     bool // For API consistency; currently unused here (used by detection_impl.go for dialect-specific SQL)
@@ -21,12 +23,14 @@ type dynamicThresholdRepository struct {
 // NewDynamicThresholdRepository creates a new DynamicThresholdRepository.
 // Parameters:
 //   - db: GORM database connection
+//   - metrics: optional DatastoreMetrics for retry observability (nil-safe)
 //   - labelRepo: LabelRepository for resolving species names to label IDs
 //   - useV2Prefix: true to use v2_ table prefix (MySQL migration mode)
 //   - isMySQL: true for MySQL dialect (affects date/time SQL expressions)
-func NewDynamicThresholdRepository(db *gorm.DB, labelRepo LabelRepository, useV2Prefix, isMySQL bool) DynamicThresholdRepository {
+func NewDynamicThresholdRepository(db *gorm.DB, metrics *datastore.Metrics, labelRepo LabelRepository, useV2Prefix, isMySQL bool) DynamicThresholdRepository {
 	return &dynamicThresholdRepository{
 		db:          db,
+		metrics:     metrics,
 		labelRepo:   labelRepo,
 		useV2Prefix: useV2Prefix,
 		isMySQL:     isMySQL,
@@ -62,12 +66,14 @@ func (r *dynamicThresholdRepository) SaveDynamicThreshold(ctx context.Context, t
 	if threshold.LabelID == 0 {
 		return errors.NewStd("dynamic threshold LabelID must be set before saving")
 	}
-	return r.db.WithContext(ctx).Table(r.thresholdTable()).
-		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "label_id"}},
-			UpdateAll: true,
-		}).
-		Create(threshold).Error
+	return datastore.RetryOnLock(ctx, "v2_save_dynamic_threshold", func() error {
+		return r.db.WithContext(ctx).Table(r.thresholdTable()).
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "label_id"}},
+				UpdateAll: true,
+			}).
+			Create(threshold).Error
+	}, r.metrics)
 }
 
 // GetDynamicThreshold retrieves a threshold by species name (scientific name).
@@ -129,13 +135,21 @@ func (r *dynamicThresholdRepository) DeleteDynamicThreshold(ctx context.Context,
 		return ErrDynamicThresholdNotFound
 	}
 
-	result := r.db.WithContext(ctx).Table(r.thresholdTable()).
-		Where("label_id IN ?", labelIDs).
-		Delete(&entities.DynamicThreshold{})
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err = datastore.RetryOnLock(ctx, "v2_delete_dynamic_threshold", func() error {
+		result := r.db.WithContext(ctx).Table(r.thresholdTable()).
+			Where("label_id IN ?", labelIDs).
+			Delete(&entities.DynamicThreshold{})
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return ErrDynamicThresholdNotFound
 	}
 	return nil
@@ -143,10 +157,18 @@ func (r *dynamicThresholdRepository) DeleteDynamicThreshold(ctx context.Context,
 
 // DeleteExpiredDynamicThresholds deletes thresholds that have expired.
 func (r *dynamicThresholdRepository) DeleteExpiredDynamicThresholds(ctx context.Context, before time.Time) (int64, error) {
-	result := r.db.WithContext(ctx).Table(r.thresholdTable()).
-		Where("expires_at < ?", before).
-		Delete(&entities.DynamicThreshold{})
-	return result.RowsAffected, result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_delete_expired_dynamic_thresholds", func() error {
+		result := r.db.WithContext(ctx).Table(r.thresholdTable()).
+			Where("expires_at < ?", before).
+			Delete(&entities.DynamicThreshold{})
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	return rowsAffected, err
 }
 
 // UpdateDynamicThresholdExpiry updates the expiry time for thresholds.
@@ -164,13 +186,21 @@ func (r *dynamicThresholdRepository) UpdateDynamicThresholdExpiry(ctx context.Co
 		return ErrDynamicThresholdNotFound
 	}
 
-	result := r.db.WithContext(ctx).Table(r.thresholdTable()).
-		Where("label_id IN ?", labelIDs).
-		Update("expires_at", expiresAt)
-	if result.Error != nil {
-		return result.Error
+	var rowsAffected int64
+	err = datastore.RetryOnLock(ctx, "v2_update_dynamic_threshold_expiry", func() error {
+		result := r.db.WithContext(ctx).Table(r.thresholdTable()).
+			Where("label_id IN ?", labelIDs).
+			Update("expires_at", expiresAt)
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 0 {
+	if rowsAffected == 0 {
 		return ErrDynamicThresholdNotFound
 	}
 	return nil
@@ -188,20 +218,30 @@ func (r *dynamicThresholdRepository) BatchSaveDynamicThresholds(ctx context.Cont
 			return errors.NewStd("all thresholds must have LabelID set before batch save")
 		}
 	}
-	return r.db.WithContext(ctx).Table(r.thresholdTable()).
-		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "label_id"}},
-			UpdateAll: true,
-		}).
-		CreateInBatches(thresholds, 100).Error
+	return datastore.RetryOnLock(ctx, "v2_batch_save_dynamic_thresholds", func() error {
+		return r.db.WithContext(ctx).Table(r.thresholdTable()).
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "label_id"}},
+				UpdateAll: true,
+			}).
+			CreateInBatches(thresholds, 100).Error
+	}, r.metrics)
 }
 
 // DeleteAllDynamicThresholds deletes all thresholds.
 func (r *dynamicThresholdRepository) DeleteAllDynamicThresholds(ctx context.Context) (int64, error) {
-	result := r.db.WithContext(ctx).Table(r.thresholdTable()).
-		Where("1 = 1").
-		Delete(&entities.DynamicThreshold{})
-	return result.RowsAffected, result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_delete_all_dynamic_thresholds", func() error {
+		result := r.db.WithContext(ctx).Table(r.thresholdTable()).
+			Where("1 = 1").
+			Delete(&entities.DynamicThreshold{})
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	return rowsAffected, err
 }
 
 // GetDynamicThresholdStats returns statistics about dynamic thresholds.
@@ -252,7 +292,9 @@ func (r *dynamicThresholdRepository) SaveThresholdEvent(ctx context.Context, eve
 	if event.LabelID == 0 {
 		return errors.NewStd("threshold event LabelID must be set before saving")
 	}
-	return r.db.WithContext(ctx).Table(r.eventTable()).Create(event).Error
+	return datastore.RetryOnLock(ctx, "v2_save_threshold_event", func() error {
+		return r.db.WithContext(ctx).Table(r.eventTable()).Create(event).Error
+	}, r.metrics)
 }
 
 // GetThresholdEvents retrieves events for a species (by scientific name).
@@ -310,15 +352,25 @@ func (r *dynamicThresholdRepository) DeleteThresholdEvents(ctx context.Context, 
 		return nil // Nothing to delete
 	}
 
-	return r.db.WithContext(ctx).Table(r.eventTable()).
-		Where("label_id IN ?", labelIDs).
-		Delete(&entities.ThresholdEvent{}).Error
+	return datastore.RetryOnLock(ctx, "v2_delete_threshold_events", func() error {
+		return r.db.WithContext(ctx).Table(r.eventTable()).
+			Where("label_id IN ?", labelIDs).
+			Delete(&entities.ThresholdEvent{}).Error
+	}, r.metrics)
 }
 
 // DeleteAllThresholdEvents deletes all threshold events.
 func (r *dynamicThresholdRepository) DeleteAllThresholdEvents(ctx context.Context) (int64, error) {
-	result := r.db.WithContext(ctx).Table(r.eventTable()).
-		Where("1 = 1").
-		Delete(&entities.ThresholdEvent{})
-	return result.RowsAffected, result.Error
+	var rowsAffected int64
+	err := datastore.RetryOnLock(ctx, "v2_delete_all_threshold_events", func() error {
+		result := r.db.WithContext(ctx).Table(r.eventTable()).
+			Where("1 = 1").
+			Delete(&entities.ThresholdEvent{})
+		if result.Error != nil {
+			return result.Error
+		}
+		rowsAffected = result.RowsAffected
+		return nil
+	}, r.metrics)
+	return rowsAffected, err
 }

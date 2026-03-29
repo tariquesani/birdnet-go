@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"encoding/json"
 	"text/template"
 	"time"
 
@@ -14,6 +15,57 @@ var TemplateFuncs = templatefuncs.Funcs
 // newTemplateWithFuncs creates a new template with the shared functions registered.
 func newTemplateWithFuncs(name string) *template.Template {
 	return template.New(name).Funcs(TemplateFuncs)
+}
+
+// jsonEscapeString escapes a string so it can be safely embedded inside a JSON
+// string literal. It marshals the value with encoding/json (which handles
+// quotes, backslashes, newlines, control characters, and unicode) then strips
+// the surrounding double-quote characters added by Marshal.
+func jsonEscapeString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		// json.Marshal on a plain string should never fail, but be safe.
+		return s
+	}
+	// Strip the leading and trailing '"' added by Marshal.
+	return string(b[1 : len(b)-1])
+}
+
+// jsonEscapeTemplateMap returns a deep copy of the map with every string
+// value recursively replaced by its JSON-escaped equivalent. This ensures
+// that when a text/template interpolates {{.Title}} into a JSON payload,
+// special characters such as quotes, newlines, and backslashes do not
+// break the JSON syntax.
+func jsonEscapeTemplateMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = jsonEscapeValue(v)
+	}
+	return out
+}
+
+// jsonEscapeValue recursively escapes string values within maps, slices, and
+// plain strings. Non-string scalars (int, float64, bool, time.Time, etc.)
+// are returned as-is since their fmt representation cannot break JSON syntax.
+func jsonEscapeValue(v any) any {
+	switch val := v.(type) {
+	case string:
+		return jsonEscapeString(val)
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, nested := range val {
+			out[k] = jsonEscapeValue(nested)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, nested := range val {
+			out[i] = jsonEscapeValue(nested)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // ToTemplateMap converts a Notification into a map for template execution.
