@@ -297,9 +297,12 @@ func (rm *RotationManager) compressFile(srcPath string) {
 		fmt.Fprintf(os.Stderr, "rotation: failed to open file for compression: %v\n", err)
 		return
 	}
+	srcClosed := false
 	defer func() {
-		if err := src.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "rotation: failed to close source file: %v\n", err)
+		if !srcClosed {
+			if err := src.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "rotation: failed to close source file: %v\n", err)
+			}
 		}
 	}()
 
@@ -330,9 +333,17 @@ func (rm *RotationManager) compressFile(srcPath string) {
 	if err := dst.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "rotation: failed to close compressed file: %v\n", err)
 		// Don't remove - the file might still be usable
+		return
 	}
 
-	// Remove original after successful compression
+	// Close source before remove. Windows rejects DeleteFile while the file is open;
+	// Unix allows unlink of an open file, but closing first is correct everywhere.
+	srcClosed = true
+	if err := src.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "rotation: failed to close source file: %v\n", err)
+		return
+	}
+
 	if err := os.Remove(srcPath); err != nil {
 		fmt.Fprintf(os.Stderr, "rotation: failed to remove original after compression: %v\n", err)
 	}
