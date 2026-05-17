@@ -539,7 +539,7 @@ Source: BSD-3-Clause
 
 ### gonum.org/v1/gonum/dsp/fourier
 
-License: Unknown
+License: https://github.com/gonum/gonum/blob/v0.17.0/LICENSE
 Source: BSD-3-Clause
 
 ### google.golang.org/api
